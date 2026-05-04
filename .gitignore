@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# macOS
+.DS_Store
+
+# Tool runtime artifacts
+# (the tool writes runs to ~/scrivener-validation by default; if anyone
+# redirects --run-root into the repo dir, ignore those too)
+runs/
+run_*/
+*.log
+
+# Editors
+.vscode/
+.idea/
+*.swp
