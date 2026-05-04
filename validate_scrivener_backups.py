@@ -421,7 +421,12 @@ def find_latest_backup(backup_dir: Path, project_name: str) -> Optional[Path]:
         return None
     candidates: list[Path] = []
     safe = re.escape(_nfc(project_name))
-    pattern = re.compile(rf"^{safe}([\s._-].*)?\.zip$", re.IGNORECASE)
+    # Space is only a valid separator when followed by a digit (date
+    # pattern: "Name 2024-01-15.zip"). A space before a letter would
+    # match a completely different project ("ИЖ copy-bak.zip" is a backup
+    # of "ИЖ copy.scriv", not of "ИЖ.scriv"). Dot, dash, and underscore
+    # can be followed by anything (they are unambiguous separators).
+    pattern = re.compile(rf"^{safe}([._-].*|\s\d.*)?\.zip$", re.IGNORECASE)
     for child in backup_dir.iterdir():
         if child.is_file() and pattern.match(_nfc(child.name)):
             candidates.append(child)
@@ -1088,10 +1093,6 @@ class Validator:
         """Best-effort restoration of the original. Never raises."""
         try:
             target = self.local / project_path.name
-            if target.exists():
-                self.log.info("Original slot already populated, no rollback needed.")
-                book.add_step("rollback", True, "target already present")
-                return
 
             # Prefer the quarantined original (it's the literal pre-state)
             source = None
@@ -1101,11 +1102,23 @@ class Validator:
                 source = safety_copy
 
             if source is None:
-                self.log.error("ROLLBACK IMPOSSIBLE — no source found. "
-                               "Quarantine path: %s", self.quarantine)
-                book.add_step("rollback", False, "no source available")
+                # Original was never quarantined (failure occurred before
+                # the quarantine step). The target still has the original.
+                if target.exists():
+                    self.log.info("Original was never quarantined; target intact.")
+                    book.add_step("rollback", True, "target already present")
+                else:
+                    self.log.error("ROLLBACK IMPOSSIBLE — no source found. "
+                                   "Quarantine path: %s", self.quarantine)
+                    book.add_step("rollback", False, "no source available")
                 return
 
+            # A quarantined original exists — restore it unconditionally.
+            # The target slot may have wrong content from a failed restore;
+            # remove it first so copytree can write cleanly.
+            if target.exists():
+                self.log.info("Removing failed restore at %s before rollback.", target)
+                shutil.rmtree(target)
             self.log.info("Rolling back from %s -> %s", source, target)
             shutil.copytree(source, target)
             book.add_step("rollback", True, f"restored from {source}")

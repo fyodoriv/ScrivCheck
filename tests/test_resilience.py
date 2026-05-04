@@ -148,6 +148,24 @@ class UnicodeNormalizationTests(unittest.TestCase):
         result = vsb.find_latest_backup(self.dir, "MyBook")
         self.assertEqual(result, zip_path)
 
+    def test_space_text_separator_does_not_match_different_project(self):
+        """'ИЖ' must NOT match 'ИЖ copy-bak-....zip' — that zip belongs
+        to a different project ('ИЖ copy.scriv'). Space+letter is not a
+        valid Scrivener separator; only space+digit (date) is."""
+        wrong_zip = self.dir / "ИЖ copy-bak-2026-05-04T18-59.zip"
+        wrong_zip.write_bytes(b"x")
+        result = vsb.find_latest_backup(self.dir, "ИЖ")
+        self.assertIsNone(result,
+                          "Space+letter separator must not match a different project")
+
+    def test_space_digit_separator_matches_date_in_name(self):
+        """'Name 2024-01-15 14-30.zip' is a legitimate Scrivener backup
+        format (space before date digit)."""
+        zip_path = self.dir / "MyBook 2024-01-15 14-30.zip"
+        zip_path.write_bytes(b"x")
+        result = vsb.find_latest_backup(self.dir, "MyBook")
+        self.assertEqual(result, zip_path)
+
 
 # ---------------------------------------------------------------------------
 # Missing-backup diagnostics

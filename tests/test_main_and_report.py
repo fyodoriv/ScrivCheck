@@ -539,11 +539,16 @@ class RollbackFallbackTests(unittest.TestCase):
         self.assertFalse(book.steps[-1]["ok"])
         self.assertIn("no source available", book.steps[-1]["detail"])
 
-    def test_target_already_present_is_a_noop(self):
-        # Pretend the original is back at its real location already
+    def test_quarantine_overwrites_wrong_target(self):
+        """If a failed restore put wrong content at the target slot but the
+        quarantine holds the real original, rollback must remove the wrong
+        content and restore from quarantine — not skip because slot is full."""
         import shutil
-        shutil.copytree(self.scriv, self.local / "MyBook.scriv")
-        # Also have a quarantined copy that we'd normally restore from
+        # Simulate a slot occupied by wrong content (e.g. wrong project)
+        wrong = self.local / "MyBook.scriv"
+        wrong.mkdir()
+        (wrong / "wrong.txt").write_bytes(b"wrong")
+        # Quarantine has the real original
         quarantined = self.v.originals / "MyBook.scriv"
         shutil.copytree(self.scriv, quarantined)
 
@@ -552,6 +557,24 @@ class RollbackFallbackTests(unittest.TestCase):
             book=book,
             project_path=Path(book.project_path),
             quarantined=quarantined,
+            safety_copy=None,
+        )
+        self.assertEqual(book.steps[-1]["ok"], True)
+        self.assertIn("restored from", book.steps[-1]["detail"])
+        # The wrong content must be gone; real content is back
+        self.assertFalse((wrong / "wrong.txt").exists())
+
+    def test_target_already_present_is_a_noop_when_no_quarantine(self):
+        """When no quarantine exists (failure before quarantine step), the
+        target still holds the original — no rollback needed."""
+        import shutil
+        shutil.copytree(self.scriv, self.local / "MyBook.scriv")
+
+        book = self._new_book()
+        self.v._rollback(
+            book=book,
+            project_path=Path(book.project_path),
+            quarantined=None,       # original was NEVER quarantined
             safety_copy=None,
         )
         self.assertEqual(book.steps[-1]["detail"], "target already present")
