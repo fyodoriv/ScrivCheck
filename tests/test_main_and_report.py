@@ -122,7 +122,6 @@ class MainTests(unittest.TestCase):
         patches = [
             mock.patch.object(vsb.sys, "platform", "darwin"),
             mock.patch("validate_scrivener_backups.scrivener_open"),
-            mock.patch("validate_scrivener_backups.scrivener_save_active"),
             mock.patch("validate_scrivener_backups.scrivener_quit"),
             mock.patch("validate_scrivener_backups.scrivener_running",
                        return_value=False),
@@ -340,7 +339,6 @@ class StagingDirReuseTests(unittest.TestCase):
 
             patches = [
                 mock.patch("validate_scrivener_backups.scrivener_open"),
-                mock.patch("validate_scrivener_backups.scrivener_save_active"),
                 mock.patch("validate_scrivener_backups.scrivener_quit"),
                 mock.patch("validate_scrivener_backups.scrivener_running",
                            return_value=False),
@@ -596,7 +594,6 @@ class EmitProofTests(unittest.TestCase):
         section, because nothing was restored. It also must not invoke
         Scrivener at all."""
         with mock.patch("validate_scrivener_backups.scrivener_open") as mopen, \
-             mock.patch("validate_scrivener_backups.scrivener_save_active") as msave, \
              mock.patch("validate_scrivener_backups.scrivener_quit") as mquit, \
              mock.patch("validate_scrivener_backups.screencapture",
                         return_value=None):
@@ -611,7 +608,6 @@ class EmitProofTests(unittest.TestCase):
         self.assertEqual(book.status, "SKIPPED")
         # No Scrivener interaction whatsoever in dry-run
         mopen.assert_not_called()
-        msave.assert_not_called()
         mquit.assert_not_called()
         # Proof artifact still written
         text = (self.run_dir / "proof" / "MyBook.txt").read_text()

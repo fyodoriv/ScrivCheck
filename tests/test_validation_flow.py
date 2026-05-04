@@ -61,7 +61,6 @@ class FlowTestCase(unittest.TestCase):
         # Patch all macOS-specific calls used by validate_book
         patches = [
             mock.patch("validate_scrivener_backups.scrivener_open"),
-            mock.patch("validate_scrivener_backups.scrivener_save_active"),
             mock.patch("validate_scrivener_backups.scrivener_quit"),
             mock.patch("validate_scrivener_backups.scrivener_running",
                        return_value=False),

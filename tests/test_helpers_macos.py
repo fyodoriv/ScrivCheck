@@ -88,7 +88,7 @@ class ScrivenerQuitTests(unittest.TestCase):
             vsb.scrivener_quit(self.log)
             mosa.assert_not_called()
 
-    def test_runs_applescript_quit_when_running(self):
+    def test_runs_applescript_quit_saving_yes_when_running(self):
         running_states = iter([True, False])  # running once, then exited
         def fake_running():
             return next(running_states)
@@ -97,8 +97,15 @@ class ScrivenerQuitTests(unittest.TestCase):
              mock.patch("validate_scrivener_backups.time.sleep"):
             vsb.scrivener_quit(self.log)
             mosa.assert_called_once()
-            self.assertIn("Scrivener", mosa.call_args.args[0])
-            self.assertIn("quit", mosa.call_args.args[0])
+            script = mosa.call_args.args[0]
+            self.assertIn("Scrivener", script)
+            # `quit saving yes` is the Standard-Suite verb that DOES work
+            # in Scrivener 3 (verified live; commit log has the receipts).
+            # Pin the literal so a refactor can't regress to a `save`-loop
+            # form that Scrivener doesn't understand.
+            self.assertIn("quit saving yes", script)
+            self.assertNotIn("save every document", script)
+            self.assertNotIn("repeat with", script)
 
     def test_warns_but_does_not_raise_when_applescript_fails(self):
         # Even if AppleScript fails, if Scrivener has actually quit we
@@ -122,7 +129,7 @@ class ScrivenerQuitTests(unittest.TestCase):
                 vsb.scrivener_quit(self.log)
 
 
-class ScrivenerOpenAndSaveTests(unittest.TestCase):
+class ScrivenerOpenTests(unittest.TestCase):
     def setUp(self):
         self.log = logging.getLogger("open-test")
         self.log.addHandler(logging.NullHandler())
@@ -137,25 +144,18 @@ class ScrivenerOpenAndSaveTests(unittest.TestCase):
             self.assertEqual(args[:4], ["open", "-g", "-a", "Scrivener"])
             self.assertEqual(args[4], "/tmp/MyBook.scriv")
 
-    def test_save_active_uses_save_every_document(self):
-        """`save every document` doesn't depend on Scrivener being the
-        frontmost app, unlike `save front document` which silently fails
-        when the app is in the background."""
-        with mock.patch("validate_scrivener_backups.osascript") as mosa, \
-             mock.patch("validate_scrivener_backups.time.sleep"):
-            vsb.scrivener_save_active(self.log)
-            mosa.assert_called_once()
-            self.assertIn("save every document", mosa.call_args.args[0])
+    def test_save_active_function_does_not_exist(self):
+        """Sanity check: the broken save helper was removed.
 
-    def test_save_active_logs_stderr_then_reraises(self):
-        """When the AppleScript save fails (typically Automation perm
-        denied), the underlying stderr should reach the user."""
-        err = subprocess.CalledProcessError(
-            1, ["osascript"], stderr="Not authorized to send Apple events to Scrivener."
-        )
-        with mock.patch("validate_scrivener_backups.osascript", side_effect=err):
-            with self.assertRaises(subprocess.CalledProcessError):
-                vsb.scrivener_save_active(self.log)
+        Scrivener 3's AppleScript dictionary rejects every ``save`` form
+        we tried (``save front document``, ``save every document``, and
+        ``save d`` inside ``repeat with d in documents`` all raise -1708
+        errAEEventNotHandled). Saving is now ridden by ``quit saving yes``
+        which lives inside :func:`scrivener_quit`. If a future refactor
+        re-introduces a standalone save helper without first verifying it
+        works against Scrivener 3, this test fails to flag the risk.
+        """
+        self.assertFalse(hasattr(vsb, "scrivener_save_active"))
 
 
 class ScreencaptureTests(unittest.TestCase):

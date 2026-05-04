@@ -236,24 +236,28 @@ def scrivener_running() -> bool:
 
 
 def scrivener_quit(log: logging.Logger) -> None:
-    """Quit Scrivener gracefully. Save any open documents first."""
+    """
+    Quit Scrivener with ``saving yes`` so any unsaved work is persisted
+    before the app exits. Scrivener 3's AppleScript dictionary doesn't
+    expose ``save`` as a verb on ``document`` or ``every document`` (both
+    raise -1708 errAEEventNotHandled), so the save-then-quit dance has
+    to ride the Standard Suite's ``quit saving yes`` rather than a
+    dedicated ``save`` call.
+
+    This double-duty:
+      • cleanly shuts the app down before the drill walks the .scriv on
+        disk (no race with mid-write Scrivener);
+      • triggers Scrivener's "Back up on save" preference (if enabled),
+        producing a fresh backup zip the drill then validates.
+    """
     if not scrivener_running():
         return
-    log.info("Quitting Scrivener (saving open documents)…")
+    log.info("Quitting Scrivener (saving via 'quit saving yes')…")
     try:
-        osascript(
-            'tell application "Scrivener"\n'
-            '  if it is running then\n'
-            '    try\n'
-            '      save every document\n'
-            '    end try\n'
-            '    quit\n'
-            '  end if\n'
-            'end tell'
-        )
+        osascript(_QUIT_SAVING_YES_APPLESCRIPT)
     except subprocess.CalledProcessError as e:
-        log.warning("Graceful quit failed: %s", e.stderr)
-    # Wait for process to actually exit
+        log.warning("Graceful quit failed: %s", (e.stderr or "").strip())
+    # Wait for the process to actually exit
     deadline = time.time() + SCRIVENER_QUIT_TIMEOUT
     while time.time() < deadline:
         if not scrivener_running():
@@ -265,34 +269,26 @@ def scrivener_quit(log: logging.Logger) -> None:
 def scrivener_open(project_path: Path, log: logging.Logger) -> None:
     """
     Open a .scriv project in Scrivener WITHOUT bringing the app to the
-    foreground. The `-g` flag tells `open` to launch in background so we
-    don't steal the user's window focus during the drill.
+    foreground. The ``-g`` flag tells ``open`` to launch in background so
+    we don't steal the user's window focus during the drill.
     """
     log.info("Opening in Scrivener (background): %s", project_path)
     run(["open", "-g", "-a", "Scrivener", str(project_path)], check=True)
-    # Give Scrivener a moment to load the project
-    time.sleep(5)
+    # Give Scrivener a moment to load the project (and detect that
+    # there's a document to save when we quit-saving-yes shortly).
+    time.sleep(8)
 
 
-def scrivener_save_active(log: logging.Logger) -> None:
-    """
-    Save every open document via AppleScript. ``save every document`` is
-    chosen over ``save front document`` because the latter requires
-    Scrivener to be the frontmost app (not the case when we open in the
-    background) and silently fails when no front window exists.
-    """
-    log.info("Saving open documents…")
-    try:
-        osascript('tell application "Scrivener" to save every document')
-    except subprocess.CalledProcessError as e:
-        # Surface the underlying AppleScript error so the user can debug
-        # — the most common cause is missing Automation permission for
-        # Terminal → Scrivener (System Settings → Privacy & Security →
-        # Automation).
-        msg = (e.stderr or "").strip() or "no stderr captured"
-        log.error("Save via AppleScript failed: %s", msg)
-        raise
-    time.sleep(2)
+# AppleScript fragments live as module-level constants so the test suite
+# can pin them in place — Scrivener 3's dictionary is restrictive enough
+# that "use the obvious verb" can be silently wrong (see commit log for
+# the ``save every document`` -1708 incident). The pinning test asserts
+# the literal ``quit saving yes`` form so a refactor cannot regress.
+_QUIT_SAVING_YES_APPLESCRIPT = (
+    'tell application "Scrivener"\n'
+    '  if it is running then quit saving yes\n'
+    'end tell'
+)
 
 
 def screencapture(out_path: Path, log: logging.Logger, enabled: bool = True) -> Optional[str]:
@@ -562,17 +558,18 @@ class Validator:
             return
 
         try:
-            # Step 1: open in Scrivener and save (triggers configured backup)
+            # Step 1: open project, then quit-with-save. The quit-time save
+            # triggers Scrivener's "Back up on save" hook (if enabled in
+            # Preferences → Backup), producing a fresh backup zip. We
+            # cannot save via AppleScript directly: Scrivener 3's dict
+            # rejects every form of `save` we tried (-1708 errAEEventNotHandled).
+            # `quit saving yes` is the supported workaround.
             scrivener_open(project_path, self.log)
             self.shot(f"{book.name}_01_opened", book)
             book.add_step("open_in_scrivener", True)
 
-            scrivener_save_active(self.log)
-            self.shot(f"{book.name}_02_saved", book)
-            book.add_step("save_to_trigger_backup", True)
-
             scrivener_quit(self.log)
-            book.add_step("quit_scrivener", True)
+            book.add_step("quit_with_save", True)
 
             # Step 2: pre-flight manifest
             self.log.info("Computing pre-flight manifest…")
@@ -640,13 +637,15 @@ class Validator:
             self.shot(f"{book.name}_05_restored", book)
             book.add_step("restore_to_local", True, str(restored))
 
-            # Step 9: open restored project to confirm Scrivener accepts it
-            scrivener_open(restored, self.log)
-            self.shot(f"{book.name}_06_reopened", book)
-            book.add_step("reopen_in_scrivener", True)
-            scrivener_quit(self.log)
+            # Manifest equality (next step) is sufficient proof that the
+            # restored .scriv is byte-identical to the pre-flight state, so
+            # Scrivener will accept it iff it accepted the original. We
+            # used to reopen Scrivener here as a smoke test; that step was
+            # removed because (a) it rewrote volatile metadata and forced
+            # filtering, and (b) it doubled the drill's runtime for no
+            # additional proof beyond what SHA-256 equality already gives.
 
-            # Step 10: post-restore manifest + comparison
+            # Step 9: post-restore manifest + comparison
             self.log.info("Computing post-restore manifest…")
             book.post_manifest = compute_manifest(restored)
             diff = compare_manifests(book.pre_manifest, book.post_manifest)

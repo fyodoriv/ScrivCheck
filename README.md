@@ -129,14 +129,12 @@ Each run writes a timestamped directory to `~/scrivener-validation/`:
 ├── report.txt             # human-readable summary
 ├── proof/
 │   └── MyBook.txt         # per-book verbose proof block (see below)
-├── screenshots/
+├── screenshots/                # only when --screenshots is passed
 │   ├── 000_00_preflight.png
 │   ├── 001_MyBook_01_opened.png
-│   ├── 002_MyBook_02_saved.png
-│   ├── 003_MyBook_03_after_quarantine.png
-│   ├── 004_MyBook_04_unzipped.png
-│   ├── 005_MyBook_05_restored.png
-│   └── 006_MyBook_06_reopened.png
+│   ├── 002_MyBook_03_after_quarantine.png
+│   ├── 003_MyBook_04_unzipped.png
+│   └── 004_MyBook_05_restored.png
 ├── logs/
 │   └── run.log            # full debug-level log
 └── quarantine/            # only present if validation failed
@@ -188,15 +186,33 @@ The SHA-256 of the zip is computed in front of you — there's no
 "trust me", just hashes you can re-verify with `shasum -a 256` on the
 backup file at any time.
 
+## How a fresh backup gets triggered
+
+`scrivcheck` does not call AppleScript `save` — Scrivener 3's dictionary
+rejects every form (`save front document`, `save every document`, and
+per-doc iteration all return `-1708 errAEEventNotHandled`). Instead the
+drill rides Scrivener's own *quit-time save*:
+
+1. `open -g -a Scrivener <project>` — load in the background.
+2. `tell application "Scrivener" to quit saving yes` — Scrivener saves
+   any pending edits, fires its **Back up on save** preference (which
+   produces the fresh backup zip the drill then validates), then exits.
+
+That means **"Back up on save"** must be enabled in *Scrivener →
+Settings → Backup* for the freshly produced zip to exist. If it isn't,
+the drill validates whatever backup zip is most recent — which may be
+older than your live state and therefore register as content drift.
+
 ## Failure modes
 
 | What you see | What it means | What to do |
 |---|---|---|
 | `No backup zip found in <dir> matching 'BookName'` | No file in the backup folder starts with the book's name | Check Scrivener's *Settings → Backup* — backup-on-save may not be configured, or the backup target may have changed |
-| `verify_manifest` fails with `content_changed` entries | The backup is older than the just-saved state | Enable "Back up with each manual save" in Scrivener |
+| `verify_manifest` fails with `content_changed` entries | The backup is older than the just-saved state | Enable *Back up on save* in Scrivener (or save manually before running the drill) |
 | `verify_manifest` fails with `content_missing` entries | The backup is genuinely incomplete | The last backup didn't capture everything — investigate before relying on it |
 | Run hangs ~30s then aborts on `quit_scrivener` | Scrivener has a modal dialog open | Close the dialog and rerun |
-| Screenshots all-black | Screen Recording permission was denied | Grant in *System Settings → Privacy & Security → Screen Recording*, or pass `--no-screenshots` |
+| `Save via AppleScript failed: <err>` | macOS denied Automation permission for Terminal → Scrivener | Grant in *System Settings → Privacy & Security → Automation* |
+| Screenshots all-black or warnings | Screen Recording permission denied | Grant in *System Settings → Privacy & Security → Screen Recording*, or simply omit `--screenshots` (the default) |
 
 In all cases the originals and safety copies remain in the quarantine
 directory printed at the end of the run.
