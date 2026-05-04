@@ -606,10 +606,9 @@ class EmitProofTests(unittest.TestCase):
         self.assertIn("Backup file", text)  # zip section present
         self.assertNotIn("Post-restore", text)  # but no post-restore
 
-    def test_dry_run_when_no_backup_zip_records_failure_reason(self):
-        """Dry-run with a missing backup zip: still emit a proof artifact
-        with the pre-flight + a NOTE explaining what's missing."""
-        # Remove the backup so locate_backup fails in dry-run too
+    def test_dry_run_when_no_backup_zip_reports_would_create(self):
+        """Dry-run with no backup zip: emit proof, note that live run would
+        create the backup. Status is SKIPPED, no failure reason about zip."""
         self.zip_path.unlink()
 
         v = vsb.Validator(
@@ -621,10 +620,10 @@ class EmitProofTests(unittest.TestCase):
         v.validate_book(book)
 
         self.assertEqual(book.status, "SKIPPED")
-        self.assertIn("no backup zip found", book.failure_reason.lower())
+        step_names = [s["name"] for s in book.steps]
+        self.assertIn("would_create_backup_dryrun", step_names)
         text = (self.run_dir / "proof" / "MyBook.txt").read_text()
         self.assertIn("DRY-RUN ATTESTATION", text)
-        self.assertIn("Pre-flight steady state", text)
 
 
 class ScriptEntryTests(unittest.TestCase):

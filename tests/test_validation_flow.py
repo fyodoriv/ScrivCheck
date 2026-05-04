@@ -177,18 +177,36 @@ class HappyPathTests(FlowTestCase):
 
 
 class FailureRollbackTests(FlowTestCase):
-    def test_no_backup_zip_marks_fail_without_touching_original(self):
-        # Remove the backup so the lookup will fail
+    def test_no_backup_zip_creates_backup_and_passes(self):
+        # Remove the backup — the tool should create one and proceed.
         self.zip_path.unlink()
 
         book = BookResult(name="MyBook", project_path=str(self.scriv))
         self.validator.validate_book(book)
 
+        self.assertEqual(book.status, "PASS",
+                         f"steps={book.steps} reason={book.failure_reason}")
+        step_names = [s["name"] for s in book.steps]
+        self.assertIn("create_backup", step_names)
+        # Original must be back at its real location after PASS.
+        self.assertTrue(self.scriv.exists())
+        self.assert_data_safety_invariant(book)
+
+    def test_backup_creation_failure_marks_fail_without_touching_original(self):
+        """If create_backup_zip itself fails (e.g. permission error), the
+        original is never quarantined and the book is marked FAIL."""
+        self.zip_path.unlink()
+
+        import validate_scrivener_backups as vsb_module
+        with mock.patch.object(vsb_module, "create_backup_zip",
+                               side_effect=OSError("disk full")):
+            book = BookResult(name="MyBook", project_path=str(self.scriv))
+            self.validator.validate_book(book)
+
         self.assertEqual(book.status, "FAIL")
-        self.assertIn("No backup zip found", book.failure_reason)
         # Original must still be at its real location, untouched.
         self.assertTrue(self.scriv.exists())
-        # And nothing should have been quarantined.
+        # Nothing should have been quarantined (failure before safety copy).
         self.assertFalse(any(self.validator.originals.iterdir()))
         self.assertFalse(any(self.validator.safety.iterdir()))
 

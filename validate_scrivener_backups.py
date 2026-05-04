@@ -483,6 +483,28 @@ def diagnose_missing_backup(
         )
 
 
+def create_backup_zip(
+    project_path: Path, backup_dir: Path, log: logging.Logger
+) -> Path:
+    """
+    Create a backup zip of the .scriv project when no existing backup is found.
+    Names the zip: <BookName>-bak-<YYYY-MM-DDTHH-MM>.zip to match
+    Scrivener's own naming convention (SCRUseDateInBackupFileNames=1 pattern).
+    The zip contains the .scriv package as its top-level directory, identical
+    to what Scrivener writes, so the existing restore path works unchanged.
+    """
+    timestamp = datetime.now().strftime("%Y-%m-%dT%H-%M")
+    zip_name = f"{project_path.stem}-bak-{timestamp}.zip"
+    zip_path = backup_dir / zip_name
+    log.info("No existing backup — creating one: %s", zip_path)
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in sorted(project_path.rglob("*")):
+            if f.is_file():
+                zf.write(f, Path(project_path.name) / f.relative_to(project_path))
+    log.info("Backup created: %s (%s bytes)", zip_path, f"{zip_path.stat().st_size:,}")
+    return zip_path
+
+
 def make_run_dir(run_root: Path) -> Path:
     """
     Return a fresh ``run_<timestamp>`` directory under ``run_root``.
@@ -732,20 +754,17 @@ class Validator:
                 f"{book.pre_manifest.total_size:,} bytes",
             )
 
-            # Step 3: locate latest backup
+            # Step 3: locate latest backup; create one if none exists
             backup_zip = find_latest_backup(self.backups, book.name)
             if not backup_zip:
-                # Loud, structured diagnostic before we abort — the user
-                # almost certainly has a config issue (wrong --backups
-                # path, or "Back up on save" disabled) and printing the
-                # raw "not found" twice never tells them which.
-                diagnose_missing_backup(self.backups, book.name, self.log)
-                raise RuntimeError(
-                    f"No backup zip found in {self.backups} matching {book.name!r}"
+                backup_zip = create_backup_zip(
+                    project_path, self.backups, self.log
                 )
+                book.add_step("create_backup", True, backup_zip.name)
+            else:
+                ensure_locally_available(backup_zip, self.log)
+                self.log.info("Latest backup: %s", backup_zip)
             book.backup_zip = str(backup_zip)
-            ensure_locally_available(backup_zip, self.log)
-            self.log.info("Latest backup: %s", backup_zip)
             book.add_step("locate_backup", True, backup_zip.name)
 
             # Step 3.5: disk-space pre-flight. Aborting BEFORE the safety
@@ -860,15 +879,15 @@ class Validator:
 
         backup_zip = find_latest_backup(self.backups, book.name)
         if backup_zip is None:
-            reason = (
-                f"no backup zip found in {self.backups} "
-                f"matching {book.name!r}"
+            self.log.info(
+                "[dry-run] No backup zip found — live run would create one in %s",
+                self.backups,
             )
-            book.failure_reason = f"dry-run: {reason}"
-            book.add_step("locate_backup_dryrun", False, reason)
-            # Loud diagnostic so the user can see *why* — most common
-            # cause is wrong --backups path or "Back up on save" disabled.
-            diagnose_missing_backup(self.backups, book.name, self.log)
+            book.add_step(
+                "would_create_backup_dryrun",
+                True,
+                f"no zip found; live run would create one in {self.backups}",
+            )
             return
 
         book.backup_zip = str(backup_zip)

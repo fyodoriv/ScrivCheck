@@ -496,15 +496,89 @@ class ValidateBookGuardsTests(unittest.TestCase):
         self.assertTrue(self.scriv.exists())
         self.assertEqual(list(self.v.originals.iterdir()), [])
 
-    def test_missing_backup_invokes_diagnostic(self):
+    def test_missing_backup_creates_backup_and_passes(self):
+        """When no backup zip exists, the tool creates one and proceeds to PASS."""
         self.zip_path.unlink()
-        with mock.patch(
-            "validate_scrivener_backups.diagnose_missing_backup"
-        ) as mdiag:
-            book = vsb.BookResult(name="MyBook", project_path=str(self.scriv))
-            self.v.validate_book(book)
-        mdiag.assert_called_once()
-        self.assertEqual(book.status, "FAIL")
+        book = vsb.BookResult(name="MyBook", project_path=str(self.scriv))
+        self.v.validate_book(book)
+        self.assertEqual(book.status, "PASS",
+                         f"steps={book.steps} reason={book.failure_reason}")
+        step_names = [s["name"] for s in book.steps]
+        self.assertIn("create_backup", step_names)
+        # Original must be back at real location after PASS
+        self.assertTrue(self.scriv.exists())
+
+
+# ---------------------------------------------------------------------------
+# create_backup_zip
+# ---------------------------------------------------------------------------
+
+
+class CreateBackupZipTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.scriv = make_fake_scriv(self.root / "local", "MyBook", SAMPLE_BOOK)
+        self.backup_dir = self.root / "backups"
+        self.backup_dir.mkdir()
+        self.log = logging.getLogger(f"cbz-{id(self)}")
+        self.log.addHandler(logging.NullHandler())
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_creates_zip_with_scrivener_naming_convention(self):
+        zip_path = vsb.create_backup_zip(self.scriv, self.backup_dir, self.log)
+        self.assertTrue(zip_path.exists())
+        self.assertRegex(
+            zip_path.name,
+            r"^MyBook-bak-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}\.zip$",
+        )
+
+    def test_created_zip_is_findable_by_find_latest_backup(self):
+        vsb.create_backup_zip(self.scriv, self.backup_dir, self.log)
+        found = vsb.find_latest_backup(self.backup_dir, "MyBook")
+        self.assertIsNotNone(found)
+
+    def test_created_zip_contains_scriv_package(self):
+        zip_path = vsb.create_backup_zip(self.scriv, self.backup_dir, self.log)
+        with zipfile.ZipFile(zip_path) as zf:
+            names = zf.namelist()
+        # Top-level directory in the zip must be the .scriv package
+        self.assertTrue(any(n.startswith("MyBook.scriv/") for n in names))
+
+    def test_created_zip_content_matches_original(self):
+        zip_path = vsb.create_backup_zip(self.scriv, self.backup_dir, self.log)
+        # Extract and verify a known file
+        extract_dir = self.root / "extracted"
+        extract_dir.mkdir()
+        vsb.safe_extract_zip(zip_path, extract_dir)
+        restored = extract_dir / "MyBook.scriv"
+        self.assertTrue(restored.is_dir())
+        content = (restored / "Files/Data/UUID-1/content.rtf").read_bytes()
+        self.assertEqual(content, SAMPLE_BOOK["Files/Data/UUID-1/content.rtf"])
+
+    def test_dry_run_no_backup_reports_would_create_without_creating(self):
+        """In dry-run mode, when no backup exists, no zip is created."""
+        run_dir = self.root / "run"
+        (run_dir / "logs").mkdir(parents=True)
+        v = vsb.Validator(
+            local_dir=self.root / "local",
+            backup_dir=self.backup_dir,
+            run_dir=run_dir,
+            log=self.log,
+            screenshots=False,
+            dry_run=True,
+        )
+        book = vsb.BookResult(name="MyBook", project_path=str(self.scriv))
+        v.validate_book(book)
+
+        # Status is SKIPPED (dry-run), not FAIL
+        self.assertEqual(book.status, "SKIPPED")
+        step_names = [s["name"] for s in book.steps]
+        self.assertIn("would_create_backup_dryrun", step_names)
+        # No zip was created
+        self.assertEqual(list(self.backup_dir.iterdir()), [])
 
 
 if __name__ == "__main__":
