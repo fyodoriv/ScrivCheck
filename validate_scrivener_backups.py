@@ -52,6 +52,7 @@ import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -64,10 +65,17 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 
 DEFAULT_LOCAL = Path.home() / "Scrivener local"
+# Scrivener for Mac's default backup destination. Users who have changed
+# the location in Scrivener → Settings → Backup → Backup Location should
+# pass --backups explicitly. The previous default pointed at the Dropbox
+# Apps/Scrivener folder which is the iOS-sync target (live .scriv
+# directories), not the backup-zip target — a real-world misconfiguration
+# trap that produced silent "no backup found" errors.
 DEFAULT_BACKUPS = (
-    Path.home() / "Library" / "CloudStorage" / "Dropbox" / "Apps" / "Scrivener"
+    Path.home() / "Library" / "Application Support" / "Scrivener" / "Backups"
 )
 DEFAULT_RUN_ROOT = Path.home() / "scrivener-validation"
+SCRIVENER_APP = Path("/Applications/Scrivener.app")
 
 # Files inside .scriv that Scrivener regenerates or that legitimately drift
 # between save and backup. We exclude these from strict content comparison.
@@ -412,26 +420,195 @@ def compare_manifests(pre: Manifest, post: Manifest) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _nfc(s: str) -> str:
+    """
+    Normalize a string to Unicode NFC. macOS HFS+/APFS historically stored
+    filenames in NFD (combining-mark form) and Python's ``Path.iterdir()``
+    surfaces them as-is; comparing against an NFC project name then misses
+    every match silently. Force both sides through NFC so a Cyrillic or
+    accented book name matches the on-disk zip filename consistently.
+    """
+    return unicodedata.normalize("NFC", s)
+
+
 def find_latest_backup(backup_dir: Path, project_name: str) -> Optional[Path]:
     """
-    Find the most recently modified .zip in `backup_dir` whose name starts
-    with `project_name`. Scrivener typically names backups:
+    Find the most recently modified .zip in ``backup_dir`` whose name
+    starts with ``project_name``. Scrivener typically names backups:
+
         ProjectName.bak.zip
         ProjectName.bak1.zip
         ProjectName 2024-01-15 14-30.zip
+        ProjectName-bak-2024-01-15T14-30.zip      (Scrivener 3 default)
     """
     if not backup_dir.exists():
         return None
     candidates: list[Path] = []
-    safe = re.escape(project_name)
+    safe = re.escape(_nfc(project_name))
     pattern = re.compile(rf"^{safe}([\s._-].*)?\.zip$", re.IGNORECASE)
     for child in backup_dir.iterdir():
-        if child.is_file() and pattern.match(child.name):
+        if child.is_file() and pattern.match(_nfc(child.name)):
             candidates.append(child)
     if not candidates:
         return None
     candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     return candidates[0]
+
+
+def diagnose_missing_backup(
+    backup_dir: Path, project_name: str, log: logging.Logger,
+) -> None:
+    """
+    When ``find_latest_backup`` comes up empty, log a structured snapshot
+    of what IS in ``backup_dir`` so the user can self-diagnose. The most
+    common causes — wrong --backups path, "Back up on save" disabled in
+    Scrivener, or backup zips for an old project name — all show up
+    differently here.
+    """
+    if not backup_dir.exists():
+        log.error("Backup directory does not exist: %s", backup_dir)
+        return
+    entries = list(backup_dir.iterdir())
+    zips = [e for e in entries if e.is_file() and e.suffix.lower() == ".zip"]
+    nfc_name = _nfc(project_name).lower()
+    prefix_matches = [
+        z for z in zips if _nfc(z.name).lower().startswith(nfc_name[:1].lower())
+    ]
+    name_substr = [z for z in zips if nfc_name in _nfc(z.name).lower()]
+
+    log.error("No backup zip matched %r in %s", project_name, backup_dir)
+    log.error(
+        "  directory has %d entries (%d are .zip files)",
+        len(entries), len(zips),
+    )
+    if zips:
+        sample = sorted(z.name for z in zips)[:5]
+        log.error("  sample zips present: %s", ", ".join(sample))
+    if name_substr:
+        log.error(
+            "  %d zip(s) contain the book name as a substring — "
+            "did the project get renamed? %s",
+            len(name_substr),
+            ", ".join(sorted(z.name for z in name_substr)[:5]),
+        )
+    elif zips and not prefix_matches:
+        log.error(
+            "  no zip starts with this book's name. Either Scrivener's "
+            "'Back up on save' is disabled for this project, or the "
+            "backup destination is configured to a different folder."
+        )
+    if not zips and entries:
+        log.error(
+            "  the directory contains %d non-zip entries — is --backups "
+            "pointing at the iOS sync folder (.scriv directories) instead "
+            "of Scrivener's backup-zip folder? Default is "
+            "~/Library/Application Support/Scrivener/Backups",
+            len(entries),
+        )
+
+
+def make_run_dir(run_root: Path) -> Path:
+    """
+    Return a fresh ``run_<timestamp>`` directory under ``run_root``.
+
+    Two ``scrivcheck`` invocations within the same wall-clock second
+    would otherwise collide on the directory name. Append a counter
+    until we get a path that doesn't already exist.
+    """
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    base = run_root / f"run_{timestamp}"
+    if not base.exists():
+        return base
+    for i in range(1, 1000):
+        candidate = run_root / f"run_{timestamp}_{i}"
+        if not candidate.exists():
+            return candidate
+    # Astronomically unlikely; if we hit it, we've earned the exception.
+    raise RuntimeError(
+        f"Could not allocate a unique run directory under {run_root}"
+    )
+
+
+def directory_size_bytes(path: Path) -> int:
+    """Sum the size of every regular file under ``path``."""
+    total = 0
+    for root, _, files in os.walk(path):
+        for fn in files:
+            try:
+                total += (Path(root) / fn).stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def assert_enough_free_space(
+    project_path: Path, run_dir: Path, log: logging.Logger,
+    headroom_factor: float = 2.5,
+) -> None:
+    """
+    Raise ``RuntimeError`` if there isn't enough free space on the
+    run-dir filesystem for the safety copy + the unzipped backup.
+
+    The drill creates two on-disk copies of the project (safety copy +
+    quarantined original would be a move on the same FS, but the
+    UNZIPPED backup is a fresh write into the run_dir). Headroom factor
+    accounts for the unzipped tree being ≈1× the live project plus a
+    safety copy of ≈1×.
+    """
+    project_size = directory_size_bytes(project_path)
+    free = shutil.disk_usage(run_dir).free
+    needed = int(project_size * headroom_factor)
+    if free < needed:
+        raise RuntimeError(
+            f"Not enough free space on {run_dir}'s filesystem: need "
+            f"~{needed:,} bytes ({headroom_factor}× project size), "
+            f"have {free:,} bytes."
+        )
+    log.debug(
+        "Disk-space pre-flight OK: project=%d bytes, free=%d bytes (%.1fx headroom)",
+        project_size, free, free / max(project_size, 1),
+    )
+
+
+def safe_extract_zip(zip_path: Path, dest_dir: Path) -> None:
+    """
+    Extract ``zip_path`` into ``dest_dir`` with a zip-slip guard: every
+    entry's resolved destination must remain inside ``dest_dir``.
+    Refuses absolute paths, ``..`` traversal, and symlink entries that
+    would escape the staging dir.
+
+    Background: ``zipfile.ZipFile.extractall`` on Python < 3.12 does not
+    by itself reject malicious paths. A tampered backup zip could carry
+    an entry like ``../../../../etc/passwd`` and clobber files outside
+    the run directory. We're a chaos engineering tool that quarantines
+    user content — we MUST be defensive about adversarial archives even
+    when the source is the user's own machine, since "the source we
+    trust" is exactly what a tampered backup pretends to be.
+    """
+    dest_real = dest_dir.resolve()
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for member in zf.infolist():
+            # Reject symlink entries outright — Scrivener doesn't write
+            # them and they're a vector for escape.
+            if (member.external_attr >> 16) & 0o170000 == 0o120000:
+                raise RuntimeError(
+                    f"Refusing to extract symlink entry {member.filename!r} "
+                    f"from {zip_path}"
+                )
+            target = (dest_dir / member.filename).resolve()
+            try:
+                target.relative_to(dest_real)
+            except ValueError as e:
+                raise RuntimeError(
+                    f"Zip-slip blocked: entry {member.filename!r} in "
+                    f"{zip_path} resolves outside the staging directory"
+                ) from e
+        zf.extractall(dest_dir)
+
+
+def scrivener_installed() -> bool:
+    """Return True iff /Applications/Scrivener.app exists."""
+    return SCRIVENER_APP.is_dir()
 
 
 def ensure_locally_available(path: Path, log: logging.Logger) -> None:
@@ -584,6 +761,11 @@ class Validator:
             # Step 3: locate latest backup
             backup_zip = find_latest_backup(self.backups, book.name)
             if not backup_zip:
+                # Loud, structured diagnostic before we abort — the user
+                # almost certainly has a config issue (wrong --backups
+                # path, or "Back up on save" disabled) and printing the
+                # raw "not found" twice never tells them which.
+                diagnose_missing_backup(self.backups, book.name, self.log)
                 raise RuntimeError(
                     f"No backup zip found in {self.backups} matching {book.name!r}"
                 )
@@ -591,6 +773,11 @@ class Validator:
             ensure_locally_available(backup_zip, self.log)
             self.log.info("Latest backup: %s", backup_zip)
             book.add_step("locate_backup", True, backup_zip.name)
+
+            # Step 3.5: disk-space pre-flight. Aborting BEFORE the safety
+            # copy means we never half-do the drill in a low-disk failure.
+            assert_enough_free_space(project_path, self.run_dir, self.log)
+            book.add_step("disk_space_check", True)
 
             # Step 4: defense-in-depth — safety copy BEFORE quarantine move
             self.log.info("Making safety copy…")
@@ -605,14 +792,13 @@ class Validator:
             self.shot(f"{book.name}_03_after_quarantine", book)
             book.add_step("quarantine_original", True, str(quarantined_original))
 
-            # Step 6: unzip backup into staging
+            # Step 6: unzip backup into staging (with zip-slip guard)
             self.log.info("Unzipping backup into staging…")
             staging_book = self.staging / book.name
             if staging_book.exists():
                 shutil.rmtree(staging_book)
             staging_book.mkdir(parents=True)
-            with zipfile.ZipFile(backup_zip, "r") as zf:
-                zf.extractall(staging_book)
+            safe_extract_zip(backup_zip, staging_book)
             self.shot(f"{book.name}_04_unzipped", book)
             book.add_step("unzip_backup", True, str(staging_book))
 
@@ -706,7 +892,9 @@ class Validator:
             )
             book.failure_reason = f"dry-run: {reason}"
             book.add_step("locate_backup_dryrun", False, reason)
-            self.log.warning("[dry-run] %s", reason)
+            # Loud diagnostic so the user can see *why* — most common
+            # cause is wrong --backups path or "Back up on save" disabled.
+            diagnose_missing_backup(self.backups, book.name, self.log)
             return
 
         book.backup_zip = str(backup_zip)
@@ -994,8 +1182,7 @@ def main() -> int:
               file=sys.stderr)
         return 2
 
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    run_dir = args.run_root / f"run_{timestamp}"
+    run_dir = make_run_dir(args.run_root)
     (run_dir / "logs").mkdir(parents=True, exist_ok=True)
 
     log = setup_logging(run_dir)
@@ -1009,6 +1196,22 @@ def main() -> int:
         return 2
     if not args.backups.exists():
         log.error("Backup folder does not exist: %s", args.backups)
+        log.error(
+            "  Hint: Scrivener for Mac's default backup location is "
+            "~/Library/Application Support/Scrivener/Backups. If you "
+            "redirected backups elsewhere in Scrivener → Settings → "
+            "Backup, pass that path with --backups."
+        )
+        return 2
+
+    # Live drill needs Scrivener installed to open the project. Dry-run
+    # never invokes Scrivener so this check is gated.
+    if not args.dry_run and not scrivener_installed():
+        log.error(
+            "Scrivener.app not found at %s — install Scrivener or pass "
+            "--dry-run to validate the latest existing backup zip without "
+            "triggering a fresh save.", SCRIVENER_APP,
+        )
         return 2
 
     validator = Validator(
