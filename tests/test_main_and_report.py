@@ -133,12 +133,12 @@ class MainTests(unittest.TestCase):
         return patches
 
     def _argv(self, *extra):
+        # Screenshots are off by default now (was --no-screenshots, now opt-in).
         return [
             "validate_scrivener_backups.py",
             "--local", str(self.local),
             "--backups", str(self.backups),
             "--run-root", str(self.run_root),
-            "--no-screenshots",
             *extra,
         ]
 
@@ -590,19 +590,16 @@ class EmitProofTests(unittest.TestCase):
         text = self._proof_text(book)
         self.assertNotIn("vanished.zip", text)  # no path printed
 
-    def test_dry_run_skipped_book_emits_no_proof(self):
-        # A SKIPPED book never produces a proof artifact — the drill didn't
-        # actually do anything to prove. The validate_book caller is
-        # responsible for the gate; here we exercise the same gate at the
-        # full-flow level.
-        with mock.patch("validate_scrivener_backups.scrivener_open"), \
-             mock.patch("validate_scrivener_backups.scrivener_save_active"), \
-             mock.patch("validate_scrivener_backups.scrivener_quit"), \
-             mock.patch("validate_scrivener_backups.scrivener_running",
-                        return_value=False), \
+    def test_dry_run_skipped_book_emits_dry_run_proof(self):
+        """Dry-run produces a proof block with the zip metadata + pre-flight
+        manifest and a DRY-RUN ATTESTATION footer — but NEVER a post-restore
+        section, because nothing was restored. It also must not invoke
+        Scrivener at all."""
+        with mock.patch("validate_scrivener_backups.scrivener_open") as mopen, \
+             mock.patch("validate_scrivener_backups.scrivener_save_active") as msave, \
+             mock.patch("validate_scrivener_backups.scrivener_quit") as mquit, \
              mock.patch("validate_scrivener_backups.screencapture",
-                        return_value=None), \
-             mock.patch("validate_scrivener_backups.ensure_locally_available"):
+                        return_value=None):
             v = vsb.Validator(
                 local_dir=self.local, backup_dir=self.backups,
                 run_dir=self.run_dir, log=self.v.log,
@@ -610,8 +607,38 @@ class EmitProofTests(unittest.TestCase):
             )
             book = vsb.BookResult(name="MyBook", project_path=str(self.scriv))
             v.validate_book(book)
-            self.assertEqual(book.status, "SKIPPED")
-            self.assertFalse((self.run_dir / "proof").exists())
+
+        self.assertEqual(book.status, "SKIPPED")
+        # No Scrivener interaction whatsoever in dry-run
+        mopen.assert_not_called()
+        msave.assert_not_called()
+        mquit.assert_not_called()
+        # Proof artifact still written
+        text = (self.run_dir / "proof" / "MyBook.txt").read_text()
+        self.assertIn("DRY-RUN ATTESTATION", text)
+        self.assertIn("Pre-flight steady state", text)
+        self.assertIn("Backup file", text)  # zip section present
+        self.assertNotIn("Post-restore", text)  # but no post-restore
+
+    def test_dry_run_when_no_backup_zip_records_failure_reason(self):
+        """Dry-run with a missing backup zip: still emit a proof artifact
+        with the pre-flight + a NOTE explaining what's missing."""
+        # Remove the backup so locate_backup fails in dry-run too
+        self.zip_path.unlink()
+
+        v = vsb.Validator(
+            local_dir=self.local, backup_dir=self.backups,
+            run_dir=self.run_dir, log=self.v.log,
+            screenshots=False, dry_run=True,
+        )
+        book = vsb.BookResult(name="MyBook", project_path=str(self.scriv))
+        v.validate_book(book)
+
+        self.assertEqual(book.status, "SKIPPED")
+        self.assertIn("no backup zip found", book.failure_reason.lower())
+        text = (self.run_dir / "proof" / "MyBook.txt").read_text()
+        self.assertIn("DRY-RUN ATTESTATION", text)
+        self.assertIn("Pre-flight steady state", text)
 
 
 class ScriptEntryTests(unittest.TestCase):

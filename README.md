@@ -84,15 +84,35 @@ export PATH="$HOME/.local/bin:$PATH"
 After install, the entire tool is one word from anywhere in your terminal:
 
 ```bash
-scrivcheck                       # full drill, all books — the default
-scrivcheck --book "MyNovel"      # just one book
-scrivcheck --dry-run             # plan only, do not move or copy anything
-scrivcheck --no-screenshots      # skip macOS Screen Recording permission
+scrivcheck                       # validate the LATEST book (most-recently
+                                 #   modified .scriv) — the default
+scrivcheck --all                 # validate every .scriv in the local folder
+scrivcheck --book "MyNovel"      # validate one specific book
+scrivcheck --dry-run             # plan only — does NOT touch Scrivener
+scrivcheck --screenshots         # also capture full-screen screenshots
 scrivcheck --keep-quarantine     # keep the quarantine even on success
 scrivcheck \                     # different folders
     --local "/path/to/local/scriv/folder" \
     --backups "/path/to/backups"
 ```
+
+### Defaults that respect your workflow
+
+- **Latest book only**, by default. Most of the time you only care about
+  the project you're actively writing in. Use `--all` when you want a
+  full sweep (e.g. quarterly recovery drill).
+- **Background open**, never focus-stealing. Scrivener is launched with
+  `open -g`, so the drill runs while you keep working in the foreground
+  application. The save uses `save every document` (not
+  `save front document`) so it does not depend on Scrivener being the
+  frontmost app.
+- **Screenshots off by default**. The PROOF block is built from
+  SHA-256 hashes, not pixels — screenshots are decorative. Pass
+  `--screenshots` if you want them and have granted Screen Recording
+  permission.
+- **Dry-run never touches Scrivener.** It hashes the backup zip,
+  computes the pre-flight manifest of the live project, and prints the
+  plan. No app is opened, no document is saved, no file is moved.
 
 Defaults assume Scrivener's standard layout (local folder under `~/Scrivener
 local`, backups under `~/Library/CloudStorage/Dropbox/Apps/Scrivener`) but

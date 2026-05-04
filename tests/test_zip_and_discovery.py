@@ -96,7 +96,7 @@ class DiscoveryTests(unittest.TestCase):
                 dry_run=True,
             )
 
-    def test_discovers_all_scriv_dirs(self):
+    def test_discovers_all_scriv_dirs_with_mode_all(self):
         with tempfile.TemporaryDirectory() as tmp:
             local = Path(tmp)
             make_fake_scriv(local, "BookOne", SAMPLE_BOOK)
@@ -106,19 +106,49 @@ class DiscoveryTests(unittest.TestCase):
             (local / "notes.txt").write_text("hi")
 
             v = self._validator_with(local)
-            books = v.discover_books()
+            books = v.discover_books(mode="all")
             names = sorted(b.name for b in books)
             self.assertEqual(names, ["BookOne", "BookTwo", "Third Book"])
 
-    def test_discover_filtered_by_name(self):
+    def test_default_mode_returns_only_latest_by_mtime(self):
+        """Default behaviour: with multiple books, only the most-recently
+        modified one is returned. This is the optimization the user
+        requested — proof of the book they're working on, not all of them."""
+        import os
+        import time as _time
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp)
+            old = make_fake_scriv(local, "Old", SAMPLE_BOOK)
+            new = make_fake_scriv(local, "New", SAMPLE_BOOK)
+            # Force mtimes so 'New' is unambiguously newer
+            now = _time.time()
+            os.utime(old, (now - 3600, now - 3600))
+            os.utime(new, (now, now))
+
+            v = self._validator_with(local)
+            books = v.discover_books()  # default mode
+            self.assertEqual([b.name for b in books], ["New"])
+
+    def test_default_mode_with_single_book_returns_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp)
+            make_fake_scriv(local, "OnlyOne", SAMPLE_BOOK)
+            v = self._validator_with(local)
+            self.assertEqual(
+                [b.name for b in v.discover_books()], ["OnlyOne"],
+            )
+
+    def test_discover_filtered_by_name_overrides_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
             local = Path(tmp)
             make_fake_scriv(local, "BookOne", SAMPLE_BOOK)
             make_fake_scriv(local, "BookTwo", SAMPLE_BOOK)
-
             v = self._validator_with(local)
-            books = v.discover_books(only="BookOne")
-            self.assertEqual([b.name for b in books], ["BookOne"])
+            # `only` should take precedence over the default 'latest' mode
+            self.assertEqual(
+                [b.name for b in v.discover_books(only="BookOne")],
+                ["BookOne"],
+            )
 
     def test_discover_filter_is_case_insensitive(self):
         with tempfile.TemporaryDirectory() as tmp:

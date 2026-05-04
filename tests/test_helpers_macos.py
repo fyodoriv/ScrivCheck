@@ -52,11 +52,17 @@ class OsascriptTests(unittest.TestCase):
             mrun.return_value = _completed(stdout="  result  \n")
             self.assertEqual(vsb.osascript('tell application "X"'), "result")
 
-    def test_propagates_called_process_error(self):
+    def test_failure_raises_with_stderr_attached(self):
+        """The exception MUST carry stderr — that's where AppleScript puts
+        actionable error messages (e.g. 'Not authorized to send Apple events')."""
         with mock.patch("validate_scrivener_backups.subprocess.run") as mrun:
-            mrun.side_effect = subprocess.CalledProcessError(1, "osascript", "", "boom")
-            with self.assertRaises(subprocess.CalledProcessError):
+            mrun.return_value = _completed(
+                returncode=1, stderr="permission denied", stdout="",
+            )
+            with self.assertRaises(subprocess.CalledProcessError) as ctx:
                 vsb.osascript('bad script')
+            self.assertEqual(ctx.exception.stderr, "permission denied")
+            self.assertEqual(ctx.exception.returncode, 1)
 
 
 class ScrivenerRunningTests(unittest.TestCase):
@@ -121,20 +127,35 @@ class ScrivenerOpenAndSaveTests(unittest.TestCase):
         self.log = logging.getLogger("open-test")
         self.log.addHandler(logging.NullHandler())
 
-    def test_open_invokes_open_command(self):
+    def test_open_invokes_open_command_in_background(self):
+        """The `-g` flag is required so opening Scrivener doesn't steal
+        the user's window focus during the drill."""
         with mock.patch("validate_scrivener_backups.run") as mrun, \
              mock.patch("validate_scrivener_backups.time.sleep"):
             vsb.scrivener_open(Path("/tmp/MyBook.scriv"), self.log)
             args = mrun.call_args.args[0]
-            self.assertEqual(args[:3], ["open", "-a", "Scrivener"])
-            self.assertEqual(args[3], "/tmp/MyBook.scriv")
+            self.assertEqual(args[:4], ["open", "-g", "-a", "Scrivener"])
+            self.assertEqual(args[4], "/tmp/MyBook.scriv")
 
-    def test_save_active_calls_osascript(self):
+    def test_save_active_uses_save_every_document(self):
+        """`save every document` doesn't depend on Scrivener being the
+        frontmost app, unlike `save front document` which silently fails
+        when the app is in the background."""
         with mock.patch("validate_scrivener_backups.osascript") as mosa, \
              mock.patch("validate_scrivener_backups.time.sleep"):
             vsb.scrivener_save_active(self.log)
             mosa.assert_called_once()
-            self.assertIn("save front document", mosa.call_args.args[0])
+            self.assertIn("save every document", mosa.call_args.args[0])
+
+    def test_save_active_logs_stderr_then_reraises(self):
+        """When the AppleScript save fails (typically Automation perm
+        denied), the underlying stderr should reach the user."""
+        err = subprocess.CalledProcessError(
+            1, ["osascript"], stderr="Not authorized to send Apple events to Scrivener."
+        )
+        with mock.patch("validate_scrivener_backups.osascript", side_effect=err):
+            with self.assertRaises(subprocess.CalledProcessError):
+                vsb.scrivener_save_active(self.log)
 
 
 class ScreencaptureTests(unittest.TestCase):

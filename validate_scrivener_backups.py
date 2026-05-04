@@ -211,8 +211,22 @@ def run(cmd: list[str], check: bool = True, timeout: Optional[int] = None) -> su
 
 
 def osascript(script: str, timeout: int = 30) -> str:
-    """Run an AppleScript, return stdout. Raises CalledProcessError on failure."""
-    proc = run(["osascript", "-e", script], check=True, timeout=timeout)
+    """
+    Run an AppleScript, return stdout. On failure, raises CalledProcessError
+    with stderr included in the exception args so callers can log it.
+    """
+    proc = subprocess.run(
+        ["osascript", "-e", script],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if proc.returncode != 0:
+        # Wrap the stderr into the exception message for visibility — the
+        # default CalledProcessError just shows the command, not the error.
+        raise subprocess.CalledProcessError(
+            proc.returncode, proc.args, proc.stdout, proc.stderr,
+        )
     return proc.stdout.strip()
 
 
@@ -249,19 +263,35 @@ def scrivener_quit(log: logging.Logger) -> None:
 
 
 def scrivener_open(project_path: Path, log: logging.Logger) -> None:
-    """Open a .scriv project in Scrivener, wait for it to load."""
-    log.info("Opening in Scrivener: %s", project_path)
-    run(["open", "-a", "Scrivener", str(project_path)], check=True)
-    # Give Scrivener a moment to load and render the window
+    """
+    Open a .scriv project in Scrivener WITHOUT bringing the app to the
+    foreground. The `-g` flag tells `open` to launch in background so we
+    don't steal the user's window focus during the drill.
+    """
+    log.info("Opening in Scrivener (background): %s", project_path)
+    run(["open", "-g", "-a", "Scrivener", str(project_path)], check=True)
+    # Give Scrivener a moment to load the project
     time.sleep(5)
 
 
 def scrivener_save_active(log: logging.Logger) -> None:
-    """Save the front document via AppleScript."""
-    log.info("Saving active document…")
-    osascript(
-        'tell application "Scrivener" to save front document'
-    )
+    """
+    Save every open document via AppleScript. ``save every document`` is
+    chosen over ``save front document`` because the latter requires
+    Scrivener to be the frontmost app (not the case when we open in the
+    background) and silently fails when no front window exists.
+    """
+    log.info("Saving open documents…")
+    try:
+        osascript('tell application "Scrivener" to save every document')
+    except subprocess.CalledProcessError as e:
+        # Surface the underlying AppleScript error so the user can debug
+        # — the most common cause is missing Automation permission for
+        # Terminal → Scrivener (System Settings → Privacy & Security →
+        # Automation).
+        msg = (e.stderr or "").strip() or "no stderr captured"
+        log.error("Save via AppleScript failed: %s", msg)
+        raise
     time.sleep(2)
 
 
@@ -469,17 +499,41 @@ class Validator:
 
     # --- discovery ---
 
-    def discover_books(self, only: Optional[str] = None) -> list[BookResult]:
+    def discover_books(
+        self,
+        only: Optional[str] = None,
+        mode: str = "latest",
+    ) -> list[BookResult]:
+        """
+        Find ``.scriv`` projects in the local folder.
+
+        ``mode`` selects which subset to return:
+          • ``"latest"`` (default) — only the most-recently-modified
+            ``.scriv`` directory. Optimized for the common case: prove
+            the backup of whatever you're working on right now.
+          • ``"all"`` — every ``.scriv`` in the local folder.
+
+        ``only`` overrides ``mode`` and selects a single named project
+        (case-insensitive match on the stem). When set, ``mode`` is
+        ignored.
+        """
         if not self.local.exists():
             raise FileNotFoundError(f"Local folder missing: {self.local}")
-        results: list[BookResult] = []
+        all_books: list[BookResult] = []
         for child in sorted(self.local.iterdir()):
             if child.suffix == ".scriv" and child.is_dir():
-                name = child.stem
-                if only and only.lower() != name.lower():
-                    continue
-                results.append(BookResult(name=name, project_path=str(child)))
-        return results
+                all_books.append(
+                    BookResult(name=child.stem, project_path=str(child))
+                )
+        if only is not None:
+            return [b for b in all_books if b.name.lower() == only.lower()]
+        if mode == "all" or len(all_books) <= 1:
+            return all_books
+        # mode == "latest": pick the most recently modified .scriv
+        all_books.sort(
+            key=lambda b: Path(b.project_path).stat().st_mtime, reverse=True,
+        )
+        return all_books[:1]
 
     # --- per-book validation ---
 
@@ -487,6 +541,11 @@ class Validator:
         """
         Run the full drill for one book. Mutates `book` with status/steps.
         Any exception is caught and turned into FAIL with auto-rollback.
+
+        Dry-run mode short-circuits BEFORE touching Scrivener: it only
+        looks at on-disk state (current manifest + latest backup zip)
+        and reports the plan. No AppleScript, no ``open``, no focus
+        stealing.
         """
         self.log.info("=" * 70)
         self.log.info("BOOK: %s", book.name)
@@ -496,6 +555,11 @@ class Validator:
         safety_copy: Optional[Path] = None
         quarantined_original: Optional[Path] = None
         restored: Optional[Path] = None
+
+        if self.dry_run:
+            self._dry_run_book(book, project_path)
+            self._emit_proof(book)
+            return
 
         try:
             # Step 1: open in Scrivener and save (triggers configured backup)
@@ -530,12 +594,6 @@ class Validator:
             ensure_locally_available(backup_zip, self.log)
             self.log.info("Latest backup: %s", backup_zip)
             book.add_step("locate_backup", True, backup_zip.name)
-
-            if self.dry_run:
-                book.status = "SKIPPED"
-                book.failure_reason = "dry-run"
-                self.log.info("[dry-run] would now safety-copy, quarantine, restore.")
-                return
 
             # Step 4: defense-in-depth — safety copy BEFORE quarantine move
             self.log.info("Making safety copy…")
@@ -620,10 +678,45 @@ class Validator:
             # that fails, from the safety copy) into the local folder.
             self._rollback(book, project_path, quarantined_original, safety_copy)
 
-        # Emit verbose proof unconditionally (except for dry-run, which
-        # didn't actually do anything to prove).
-        if book.status != "SKIPPED":
-            self._emit_proof(book)
+        self._emit_proof(book)
+
+    def _dry_run_book(self, book: BookResult, project_path: Path) -> None:
+        """
+        Dry-run path. Inspects on-disk state only — no Scrivener calls,
+        no file moves. Useful as a quick check that a backup zip exists
+        and that the script can hash the live project.
+        """
+        book.status = "SKIPPED"
+        book.failure_reason = "dry-run (no Scrivener interaction, no restore)"
+
+        # Pre-flight manifest is a pure file walk; safe in dry-run.
+        self.log.info("Computing pre-flight manifest (no save)…")
+        book.pre_manifest = compute_manifest(project_path)
+        book.add_step(
+            "preflight_manifest_dryrun",
+            True,
+            f"{book.pre_manifest.file_count} files, "
+            f"{book.pre_manifest.total_size:,} bytes",
+        )
+
+        backup_zip = find_latest_backup(self.backups, book.name)
+        if backup_zip is None:
+            reason = (
+                f"no backup zip found in {self.backups} "
+                f"matching {book.name!r}"
+            )
+            book.failure_reason = f"dry-run: {reason}"
+            book.add_step("locate_backup_dryrun", False, reason)
+            self.log.warning("[dry-run] %s", reason)
+            return
+
+        book.backup_zip = str(backup_zip)
+        book.add_step("locate_backup_dryrun", True, backup_zip.name)
+        self.log.info(
+            "[dry-run] live drill would: open Scrivener (background), "
+            "save → refresh backup, quarantine original, unzip backup, "
+            "restore, verify SHA-256."
+        )
 
     def _emit_proof(self, book: BookResult) -> None:
         """
@@ -735,7 +828,25 @@ class Validator:
                 f"    At:         {datetime.now().isoformat(timespec='seconds')}"
             )
 
-        if book.failure_reason and not post:
+        # Dry-run gets its own attestation: state what was inspected,
+        # don't pretend a hypothesis was tested.
+        if book.status == "SKIPPED" and not post:
+            lines.append("")
+            lines.append("DRY-RUN ATTESTATION")
+            lines.append("    Status:     SKIPPED (plan only, no restore)")
+            inspected = []
+            if book.backup_zip and Path(book.backup_zip).exists():
+                inspected.append("backup zip presence + SHA-256")
+            if pre:
+                inspected.append("live folder pre-flight manifest")
+            lines.append(
+                f"    Inspected:  {', '.join(inspected) if inspected else 'nothing'}"
+            )
+            lines.append(
+                "    Note:       no save was triggered, no files were moved."
+            )
+
+        if book.status == "FAIL" and not post:
             lines.append("")
             lines.append("NOTE")
             lines.append(
@@ -851,13 +962,32 @@ def main() -> int:
     parser.add_argument("--local", type=Path, default=DEFAULT_LOCAL)
     parser.add_argument("--backups", type=Path, default=DEFAULT_BACKUPS)
     parser.add_argument("--run-root", type=Path, default=DEFAULT_RUN_ROOT)
-    parser.add_argument("--book", type=str, default=None,
-                        help="Validate only this book (by name, no .scriv).")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Plan only, do not modify anything.")
-    parser.add_argument("--no-screenshots", action="store_true")
-    parser.add_argument("--keep-quarantine", action="store_true",
-                        help="Do not auto-purge quarantine even if all pass.")
+    parser.add_argument(
+        "--book", type=str, default=None,
+        help="Validate only this book (by name, no .scriv). Overrides --all.",
+    )
+    parser.add_argument(
+        "--all", action="store_true",
+        help=(
+            "Validate every .scriv in the local folder. "
+            "Default is to validate only the most-recently-modified one."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Plan only — no Scrivener interaction, no file changes.",
+    )
+    parser.add_argument(
+        "--screenshots", action="store_true",
+        help=(
+            "Capture full-screen screenshots at each visible step. Off by "
+            "default; requires macOS Screen Recording permission."
+        ),
+    )
+    parser.add_argument(
+        "--keep-quarantine", action="store_true",
+        help="Do not auto-purge the quarantine even if all books pass.",
+    )
     args = parser.parse_args()
 
     if sys.platform != "darwin":
@@ -887,26 +1017,35 @@ def main() -> int:
         backup_dir=args.backups,
         run_dir=run_dir,
         log=log,
-        screenshots=not args.no_screenshots,
+        screenshots=args.screenshots,
         dry_run=args.dry_run,
     )
 
-    # Pre-flight: make sure Scrivener is closed
-    scrivener_quit(log)
+    # Pre-flight: make sure Scrivener is closed (skip in dry-run — we don't
+    # want a dry-run plan to disturb the user's actual editing session).
+    if not args.dry_run:
+        scrivener_quit(log)
     validator.shot("00_preflight")
 
-    books = validator.discover_books(only=args.book)
+    mode = "all" if args.all else "latest"
+    books = validator.discover_books(only=args.book, mode=mode)
     if not books:
         log.warning("No .scriv projects found.")
         return 1
 
-    log.info("Discovered %d book(s): %s", len(books), ", ".join(b.name for b in books))
+    selection = (
+        f"{books[0].name} (latest by mtime)" if mode == "latest" and not args.book
+        else ", ".join(b.name for b in books)
+    )
+    log.info("Validating %d book(s): %s", len(books), selection)
 
     for book in books:
         try:
             validator.validate_book(book)
         finally:
-            scrivener_quit(log)
+            # Don't try to quit Scrivener in dry-run — we never opened it.
+            if not args.dry_run:
+                scrivener_quit(log)
 
     # Final report
     report_path = write_report(run_dir, books)
