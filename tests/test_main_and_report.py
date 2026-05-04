@@ -121,8 +121,6 @@ class MainTests(unittest.TestCase):
         """Patch everything that talks to macOS. Returns the ExitStack."""
         patches = [
             mock.patch.object(vsb.sys, "platform", "darwin"),
-            mock.patch("validate_scrivener_backups.scrivener_open"),
-            mock.patch("validate_scrivener_backups.scrivener_quit"),
             mock.patch("validate_scrivener_backups.scrivener_running",
                        return_value=False),
             mock.patch("validate_scrivener_backups.screencapture",
@@ -338,8 +336,6 @@ class StagingDirReuseTests(unittest.TestCase):
             log.addHandler(logging.NullHandler())
 
             patches = [
-                mock.patch("validate_scrivener_backups.scrivener_open"),
-                mock.patch("validate_scrivener_backups.scrivener_quit"),
                 mock.patch("validate_scrivener_backups.scrivener_running",
                            return_value=False),
                 mock.patch("validate_scrivener_backups.screencapture",
@@ -591,11 +587,8 @@ class EmitProofTests(unittest.TestCase):
     def test_dry_run_skipped_book_emits_dry_run_proof(self):
         """Dry-run produces a proof block with the zip metadata + pre-flight
         manifest and a DRY-RUN ATTESTATION footer — but NEVER a post-restore
-        section, because nothing was restored. It also must not invoke
-        Scrivener at all."""
-        with mock.patch("validate_scrivener_backups.scrivener_open") as mopen, \
-             mock.patch("validate_scrivener_backups.scrivener_quit") as mquit, \
-             mock.patch("validate_scrivener_backups.screencapture",
+        section, because nothing was restored."""
+        with mock.patch("validate_scrivener_backups.screencapture",
                         return_value=None):
             v = vsb.Validator(
                 local_dir=self.local, backup_dir=self.backups,
@@ -606,9 +599,6 @@ class EmitProofTests(unittest.TestCase):
             v.validate_book(book)
 
         self.assertEqual(book.status, "SKIPPED")
-        # No Scrivener interaction whatsoever in dry-run
-        mopen.assert_not_called()
-        mquit.assert_not_called()
         # Proof artifact still written
         text = (self.run_dir / "proof" / "MyBook.txt").read_text()
         self.assertIn("DRY-RUN ATTESTATION", text)

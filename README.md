@@ -8,8 +8,10 @@ Built because manually running through "save → copy → delete → unzip →
 restore → verify" once a quarter is exactly the kind of recovery drill
 that gets skipped right up until the day you actually need it.
 
-> **Status:** macOS only (depends on AppleScript and `screencapture`).
-> Tested with Scrivener 3.
+> **Status:** macOS only (reads Scrivener prefs via `defaults`,
+> optionally captures screenshots via `screencapture`).
+> Tested with Scrivener 3. No Scrivener interaction at runtime — no
+> Automation permission needed, no focus loss.
 
 ## What it does
 
@@ -101,18 +103,30 @@ scrivcheck \                     # different folders
 - **Latest book only**, by default. Most of the time you only care about
   the project you're actively writing in. Use `--all` when you want a
   full sweep (e.g. quarterly recovery drill).
-- **Background open**, never focus-stealing. Scrivener is launched with
-  `open -g`, so the drill runs while you keep working in the foreground
-  application. The save uses `save every document` (not
-  `save front document`) so it does not depend on Scrivener being the
-  frontmost app.
+- **Backup path auto-discovered.** If `--backups` is omitted, the path
+  is read from Scrivener's preferences
+  (`SCRAutomaticBackupPath` in `com.literatureandlatte.scrivener3`).
+  This Just Works™ even when you've redirected backups to Dropbox /
+  iCloud / a custom folder. Falls back to
+  `~/Library/Application Support/Scrivener/Backups` only when prefs
+  can't be read.
+- **No Scrivener interaction.** Earlier releases tried to drive
+  Scrivener via AppleScript to trigger a fresh backup before
+  validation. That was unreliable: Scrivener 3's dictionary rejects
+  every `save` form (-1708 errAEEventNotHandled), and even
+  `quit saving yes` does not fire the *Back up on save* hook
+  (which is gated on user-initiated Cmd+S). The tool now validates
+  the latest *existing* backup zip and never launches Scrivener,
+  steals focus, or needs Automation permission. Save manually in
+  Scrivener (`⌘S`) before running `scrivcheck` if you want a fresh
+  backup validated.
 - **Screenshots off by default**. The PROOF block is built from
   SHA-256 hashes, not pixels — screenshots are decorative. Pass
   `--screenshots` if you want them and have granted Screen Recording
   permission.
-- **Dry-run never touches Scrivener.** It hashes the backup zip,
-  computes the pre-flight manifest of the live project, and prints the
-  plan. No app is opened, no document is saved, no file is moved.
+- **Dry-run is a pure plan**. Hashes the backup zip, computes the
+  pre-flight manifest of the live project, prints the plan. No file
+  is moved, nothing destructive happens.
 
 Defaults assume Scrivener's standard layout (local folder under `~/Scrivener
 local`, backups under `~/Library/CloudStorage/Dropbox/Apps/Scrivener`) but
@@ -186,22 +200,24 @@ The SHA-256 of the zip is computed in front of you — there's no
 "trust me", just hashes you can re-verify with `shasum -a 256` on the
 backup file at any time.
 
-## How a fresh backup gets triggered
+## Getting a fresh backup before validation
 
-`scrivcheck` does not call AppleScript `save` — Scrivener 3's dictionary
-rejects every form (`save front document`, `save every document`, and
-per-doc iteration all return `-1708 errAEEventNotHandled`). Instead the
-drill rides Scrivener's own *quit-time save*:
+`scrivcheck` validates the latest *existing* backup zip — it doesn't
+generate one for you. To validate today's work:
 
-1. `open -g -a Scrivener <project>` — load in the background.
-2. `tell application "Scrivener" to quit saving yes` — Scrivener saves
-   any pending edits, fires its **Back up on save** preference (which
-   produces the fresh backup zip the drill then validates), then exits.
+1. In Scrivener, hit **`⌘S`** (or *File → Save*). With *Settings →
+   Backup → Back up on save* enabled, this writes a fresh backup zip
+   to your configured backup folder.
+2. Run `scrivcheck`.
 
-That means **"Back up on save"** must be enabled in *Scrivener →
-Settings → Backup* for the freshly produced zip to exist. If it isn't,
-the drill validates whatever backup zip is most recent — which may be
-older than your live state and therefore register as content drift.
+Why no auto-trigger? Earlier releases tried `tell application
+"Scrivener" to quit saving yes`, which does save the document but
+does **not** fire the *Back up on save* hook (the hook is gated on
+user-initiated `⌘S` only). The hook also can't be invoked from
+AppleScript directly — Scrivener 3's dictionary rejects every `save`
+form (`save front document`, `save every document`, per-document
+iteration: all `-1708 errAEEventNotHandled`). Validating what's
+actually on disk is the only honest contract.
 
 ## Failure modes
 
@@ -213,9 +229,7 @@ older than your live state and therefore register as content drift.
 | `Zip-slip blocked: entry '...' resolves outside the staging directory` | A backup zip carries an entry trying to escape the staging dir (path traversal). Either tampered or generated by a non-standard tool | Treat the zip as suspect. Don't reuse it. Take a fresh backup from inside Scrivener |
 | `Refusing to extract symlink entry` | A backup zip contains a symlink, which Scrivener doesn't write | Same: don't trust the zip |
 | `Not enough free space on <fs>'s filesystem` | The drill aborted before any quarantine move because the safety copy + unzipped backup wouldn't fit | Free up disk space (the drill needs ≈2.5× the project size as headroom) |
-| `Scrivener.app not found at /Applications/Scrivener.app` | Live drill can't open the project | Install Scrivener, or pass `--dry-run` to validate the latest existing backup zip without invoking Scrivener |
-| Run hangs ~30s then aborts on `quit_scrivener` | Scrivener has a modal dialog open | Close the dialog and rerun |
-| `Graceful quit failed: <err>` | macOS denied Automation permission for Terminal → Scrivener | Grant in *System Settings → Privacy & Security → Automation* |
+| `Scrivener is running. The pre-flight manifest may catch files mid-write...` | Informational only — drill proceeds. Manifest could capture a half-written state if Scrivener saves at the same instant | Quit Scrivener first if you want a paranoid-clean run |
 | Screenshots all-black or warnings | Screen Recording permission denied | Grant in *System Settings → Privacy & Security → Screen Recording*, or simply omit `--screenshots` (the default) |
 
 In all cases the originals and safety copies remain in the quarantine
@@ -223,15 +237,15 @@ directory printed at the end of the run.
 
 ## macOS permissions
 
-First run will prompt for two permissions:
+The default `scrivcheck` invocation needs **no permission grants**.
+The tool only reads files and runs `defaults read` to discover
+Scrivener's backup folder.
 
-- **Automation** (`Terminal → Scrivener`) — required for save and quit
-  via AppleScript. Without it the tool can't drive Scrivener.
-- **Screen Recording** (`Terminal`) — required for `screencapture` to
-  capture window contents. Without it, screenshots are black; pass
-  `--no-screenshots` and the rest still works.
+You'll be prompted only if you opt into screenshots:
 
-Both are granted in *System Settings → Privacy & Security*.
+- **Screen Recording** (`Terminal`) — required by `screencapture` if
+  you pass `--screenshots`. Granted in *System Settings → Privacy &
+  Security → Screen Recording*.
 
 ## Development
 
@@ -256,10 +270,10 @@ extra). Continuous integration runs on Ubuntu against Python 3.10,
 3.11, 3.12, and 3.13 via GitHub Actions (`.github/workflows/tests.yml`)
 and the build fails if coverage drops below 100%.
 
-The macOS-specific code paths (AppleScript, `screencapture`, Scrivener
-open, `pgrep`, `brctl`) are mocked at the `subprocess` boundary so the
-chaos engineering invariants — including the rollback paths — are
-exercised on every CI run.
+The macOS-specific code paths (`defaults`, `screencapture`, `pgrep`,
+`brctl`) are mocked at the `subprocess` boundary so the chaos
+engineering invariants — including the rollback paths and the
+adversarial-zip defenses — are exercised on every CI run.
 
 ## License
 

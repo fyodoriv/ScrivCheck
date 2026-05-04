@@ -51,7 +51,6 @@ import re
 import shutil
 import subprocess
 import sys
-import time
 import unicodedata
 import zipfile
 from dataclasses import dataclass, field
@@ -65,17 +64,20 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 
 DEFAULT_LOCAL = Path.home() / "Scrivener local"
-# Scrivener for Mac's default backup destination. Users who have changed
-# the location in Scrivener → Settings → Backup → Backup Location should
-# pass --backups explicitly. The previous default pointed at the Dropbox
-# Apps/Scrivener folder which is the iOS-sync target (live .scriv
-# directories), not the backup-zip target — a real-world misconfiguration
-# trap that produced silent "no backup found" errors.
-DEFAULT_BACKUPS = (
+# Scrivener for Mac's hard-coded fallback backup location. The actual
+# backup folder is read from Scrivener's preferences at runtime (the
+# user can redirect it in Scrivener → Settings → Backup → Backup
+# Location), so this constant is only used when the preference can't
+# be read (e.g. Scrivener never launched on this machine).
+FALLBACK_BACKUPS = (
     Path.home() / "Library" / "Application Support" / "Scrivener" / "Backups"
 )
 DEFAULT_RUN_ROOT = Path.home() / "scrivener-validation"
-SCRIVENER_APP = Path("/Applications/Scrivener.app")
+
+# Scrivener 3's preferences domain and the backup-folder key we read
+# at startup so the user doesn't have to know where their backups are.
+SCRIVENER_PREFS_DOMAIN = "com.literatureandlatte.scrivener3"
+SCRIVENER_PREFS_BACKUP_KEY = "SCRAutomaticBackupPath"
 
 # Files inside .scriv that Scrivener regenerates or that legitimately drift
 # between save and backup. We exclude these from strict content comparison.
@@ -93,8 +95,6 @@ CONTENT_PREFIXES = (
     "Files/Docs/",     # older Scrivener layout
 )
 
-BACKUP_SETTLE_SECONDS = 8     # how long to wait after Save for backup zip
-SCRIVENER_QUIT_TIMEOUT = 30   # seconds
 
 
 # ---------------------------------------------------------------------------
@@ -243,60 +243,36 @@ def scrivener_running() -> bool:
     return proc.returncode == 0
 
 
-def scrivener_quit(log: logging.Logger) -> None:
+def discover_scrivener_backup_path() -> Optional[Path]:
     """
-    Quit Scrivener with ``saving yes`` so any unsaved work is persisted
-    before the app exits. Scrivener 3's AppleScript dictionary doesn't
-    expose ``save`` as a verb on ``document`` or ``every document`` (both
-    raise -1708 errAEEventNotHandled), so the save-then-quit dance has
-    to ride the Standard Suite's ``quit saving yes`` rather than a
-    dedicated ``save`` call.
+    Read Scrivener's configured backup folder from its preferences.
 
-    This double-duty:
-      • cleanly shuts the app down before the drill walks the .scriv on
-        disk (no race with mid-write Scrivener);
-      • triggers Scrivener's "Back up on save" preference (if enabled),
-        producing a fresh backup zip the drill then validates.
+    Scrivener 3 stores it under ``com.literatureandlatte.scrivener3 →
+    SCRAutomaticBackupPath``. Returns the resolved Path if both the key
+    is set AND the directory exists; ``None`` otherwise (in which case
+    the caller should fall back to ``FALLBACK_BACKUPS``).
+
+    The previous "guess a default" approach pointed every user who'd
+    redirected backups to a wrong directory and produced silent "no
+    zip found" failures. Reading prefs makes ``scrivcheck`` correct
+    out-of-the-box for the >95% of users who never pass ``--backups``.
     """
-    if not scrivener_running():
-        return
-    log.info("Quitting Scrivener (saving via 'quit saving yes')…")
     try:
-        osascript(_QUIT_SAVING_YES_APPLESCRIPT)
-    except subprocess.CalledProcessError as e:
-        log.warning("Graceful quit failed: %s", (e.stderr or "").strip())
-    # Wait for the process to actually exit
-    deadline = time.time() + SCRIVENER_QUIT_TIMEOUT
-    while time.time() < deadline:
-        if not scrivener_running():
-            return
-        time.sleep(0.5)
-    raise RuntimeError("Scrivener did not quit within timeout")
-
-
-def scrivener_open(project_path: Path, log: logging.Logger) -> None:
-    """
-    Open a .scriv project in Scrivener WITHOUT bringing the app to the
-    foreground. The ``-g`` flag tells ``open`` to launch in background so
-    we don't steal the user's window focus during the drill.
-    """
-    log.info("Opening in Scrivener (background): %s", project_path)
-    run(["open", "-g", "-a", "Scrivener", str(project_path)], check=True)
-    # Give Scrivener a moment to load the project (and detect that
-    # there's a document to save when we quit-saving-yes shortly).
-    time.sleep(8)
-
-
-# AppleScript fragments live as module-level constants so the test suite
-# can pin them in place — Scrivener 3's dictionary is restrictive enough
-# that "use the obvious verb" can be silently wrong (see commit log for
-# the ``save every document`` -1708 incident). The pinning test asserts
-# the literal ``quit saving yes`` form so a refactor cannot regress.
-_QUIT_SAVING_YES_APPLESCRIPT = (
-    'tell application "Scrivener"\n'
-    '  if it is running then quit saving yes\n'
-    'end tell'
-)
+        proc = subprocess.run(
+            ["defaults", "read", SCRIVENER_PREFS_DOMAIN, SCRIVENER_PREFS_BACKUP_KEY],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    raw = proc.stdout.strip()
+    if not raw:
+        return None
+    candidate = Path(raw).expanduser()
+    if candidate.is_dir():
+        return candidate
+    return None
 
 
 def screencapture(out_path: Path, log: logging.Logger, enabled: bool = True) -> Optional[str]:
@@ -606,11 +582,6 @@ def safe_extract_zip(zip_path: Path, dest_dir: Path) -> None:
         zf.extractall(dest_dir)
 
 
-def scrivener_installed() -> bool:
-    """Return True iff /Applications/Scrivener.app exists."""
-    return SCRIVENER_APP.is_dir()
-
-
 def ensure_locally_available(path: Path, log: logging.Logger) -> None:
     """
     Dropbox via CloudStorage may keep files online-only. Force download by
@@ -735,20 +706,23 @@ class Validator:
             return
 
         try:
-            # Step 1: open project, then quit-with-save. The quit-time save
-            # triggers Scrivener's "Back up on save" hook (if enabled in
-            # Preferences → Backup), producing a fresh backup zip. We
-            # cannot save via AppleScript directly: Scrivener 3's dict
-            # rejects every form of `save` we tried (-1708 errAEEventNotHandled).
-            # `quit saving yes` is the supported workaround.
-            scrivener_open(project_path, self.log)
-            self.shot(f"{book.name}_01_opened", book)
-            book.add_step("open_in_scrivener", True)
+            # Live mode no longer drives Scrivener. Earlier versions tried
+            # to open the project and `quit saving yes` to fire Scrivener's
+            # "Back up on save" hook; in practice that hook is gated on
+            # SCRBackUpOnManualSave (manual Cmd+S only) and never fires
+            # from an AppleScript-initiated save. Validating the latest
+            # *existing* backup is the honest, focus-respecting contract.
+            # Users who want a fresh backup save manually in Scrivener
+            # before running scrivcheck.
+            if scrivener_running():
+                self.log.warning(
+                    "Scrivener is running. The pre-flight manifest may "
+                    "catch files mid-write if Scrivener saves during the "
+                    "drill. Quit Scrivener first for the cleanest run."
+                )
+                book.add_step("scrivener_running_warning", True)
 
-            scrivener_quit(self.log)
-            book.add_step("quit_with_save", True)
-
-            # Step 2: pre-flight manifest
+            # Step 1: pre-flight manifest
             self.log.info("Computing pre-flight manifest…")
             book.pre_manifest = compute_manifest(project_path)
             book.add_step(
@@ -1147,7 +1121,15 @@ def main() -> int:
         description="Chaos-engineering drill for Scrivener backups."
     )
     parser.add_argument("--local", type=Path, default=DEFAULT_LOCAL)
-    parser.add_argument("--backups", type=Path, default=DEFAULT_BACKUPS)
+    parser.add_argument(
+        "--backups", type=Path, default=None,
+        help=(
+            "Folder containing Scrivener backup zips. If omitted, the "
+            "path is read from Scrivener's preferences "
+            "(SCRAutomaticBackupPath); falls back to "
+            f"{FALLBACK_BACKUPS} if prefs aren't readable."
+        ),
+    )
     parser.add_argument("--run-root", type=Path, default=DEFAULT_RUN_ROOT)
     parser.add_argument(
         "--book", type=str, default=None,
@@ -1187,8 +1169,25 @@ def main() -> int:
 
     log = setup_logging(run_dir)
     log.info("Run dir: %s", run_dir)
+
+    # If --backups wasn't passed (sentinel: None), discover from
+    # Scrivener's preferences. Falls back to the hard-coded default
+    # only when prefs can't be read AND the fallback exists.
+    if args.backups is None:
+        discovered = discover_scrivener_backup_path()
+        if discovered is not None:
+            args.backups = discovered
+            log.info(
+                "Backups (auto-discovered from Scrivener prefs): %s",
+                args.backups,
+            )
+        else:
+            args.backups = FALLBACK_BACKUPS
+            log.info("Backups (fallback default): %s", args.backups)
+    else:
+        log.info("Backups: %s", args.backups)
+
     log.info("Local:   %s", args.local)
-    log.info("Backups: %s", args.backups)
     log.info("Mode:    %s", "DRY-RUN" if args.dry_run else "LIVE")
 
     if not args.local.exists():
@@ -1197,20 +1196,8 @@ def main() -> int:
     if not args.backups.exists():
         log.error("Backup folder does not exist: %s", args.backups)
         log.error(
-            "  Hint: Scrivener for Mac's default backup location is "
-            "~/Library/Application Support/Scrivener/Backups. If you "
-            "redirected backups elsewhere in Scrivener → Settings → "
-            "Backup, pass that path with --backups."
-        )
-        return 2
-
-    # Live drill needs Scrivener installed to open the project. Dry-run
-    # never invokes Scrivener so this check is gated.
-    if not args.dry_run and not scrivener_installed():
-        log.error(
-            "Scrivener.app not found at %s — install Scrivener or pass "
-            "--dry-run to validate the latest existing backup zip without "
-            "triggering a fresh save.", SCRIVENER_APP,
+            "  Pass --backups <path> or check Scrivener → Settings → "
+            "Backup → Backup Location."
         )
         return 2
 
@@ -1222,11 +1209,6 @@ def main() -> int:
         screenshots=args.screenshots,
         dry_run=args.dry_run,
     )
-
-    # Pre-flight: make sure Scrivener is closed (skip in dry-run — we don't
-    # want a dry-run plan to disturb the user's actual editing session).
-    if not args.dry_run:
-        scrivener_quit(log)
     validator.shot("00_preflight")
 
     mode = "all" if args.all else "latest"
@@ -1242,12 +1224,7 @@ def main() -> int:
     log.info("Validating %d book(s): %s", len(books), selection)
 
     for book in books:
-        try:
-            validator.validate_book(book)
-        finally:
-            # Don't try to quit Scrivener in dry-run — we never opened it.
-            if not args.dry_run:
-                scrivener_quit(log)
+        validator.validate_book(book)
 
     # Final report
     report_path = write_report(run_dir, books)

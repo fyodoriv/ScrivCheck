@@ -300,81 +300,125 @@ class DirectorySizeTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Scrivener.app installation check
+# Scrivener backup-path discovery
 # ---------------------------------------------------------------------------
 
 
-class ScrivenerInstalledTests(unittest.TestCase):
-    def test_returns_true_when_app_dir_present(self):
+class DiscoverScrivenerBackupPathTests(unittest.TestCase):
+    """Reading SCRAutomaticBackupPath from Scrivener's prefs is the
+    single biggest UX win — the previous "guess a default" approach
+    pointed at the wrong directory for any user who'd redirected
+    backups (which is most users with Dropbox/iCloud setups)."""
+
+    def test_returns_none_when_defaults_command_missing(self):
+        with mock.patch(
+            "validate_scrivener_backups.subprocess.run",
+            side_effect=FileNotFoundError(),
+        ):
+            self.assertIsNone(vsb.discover_scrivener_backup_path())
+
+    def test_returns_none_on_timeout(self):
+        import subprocess as _sp
+        with mock.patch(
+            "validate_scrivener_backups.subprocess.run",
+            side_effect=_sp.TimeoutExpired("defaults", 5),
+        ):
+            self.assertIsNone(vsb.discover_scrivener_backup_path())
+
+    def test_returns_none_when_pref_unset(self):
+        with mock.patch(
+            "validate_scrivener_backups.subprocess.run",
+            return_value=mock.MagicMock(returncode=1, stdout="", stderr=""),
+        ):
+            self.assertIsNone(vsb.discover_scrivener_backup_path())
+
+    def test_returns_none_when_pref_empty_string(self):
+        with mock.patch(
+            "validate_scrivener_backups.subprocess.run",
+            return_value=mock.MagicMock(returncode=0, stdout="\n"),
+        ):
+            self.assertIsNone(vsb.discover_scrivener_backup_path())
+
+    def test_returns_path_when_pref_set_and_dir_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
-            fake_app = Path(tmp) / "Scrivener.app"
-            fake_app.mkdir()
-            with mock.patch("validate_scrivener_backups.SCRIVENER_APP", fake_app):
-                self.assertTrue(vsb.scrivener_installed())
+            with mock.patch(
+                "validate_scrivener_backups.subprocess.run",
+                return_value=mock.MagicMock(returncode=0, stdout=tmp + "\n"),
+            ):
+                self.assertEqual(vsb.discover_scrivener_backup_path(), Path(tmp))
 
-    def test_returns_false_when_app_missing(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch("validate_scrivener_backups.SCRIVENER_APP",
-                            Path(tmp) / "Scrivener.app"):
-                self.assertFalse(vsb.scrivener_installed())
+    def test_returns_none_when_pref_path_does_not_exist(self):
+        """A configured-but-deleted path mustn't get returned silently;
+        the fallback path is more useful in that case."""
+        with mock.patch(
+            "validate_scrivener_backups.subprocess.run",
+            return_value=mock.MagicMock(
+                returncode=0, stdout="/Users/nope/totally-not-real/x\n",
+            ),
+        ):
+            self.assertIsNone(vsb.discover_scrivener_backup_path())
 
 
-class MainScrivenerNotInstalledTests(unittest.TestCase):
-    """The live drill must abort with a clear error when Scrivener.app is
-    not installed — otherwise we'd hit a less helpful error inside `open`
-    at a random step."""
+class MainBackupPathDiscoveryTests(unittest.TestCase):
+    """When --backups is omitted, main() should pick up Scrivener's
+    configured path. When provided, main() should respect it."""
 
-    def test_live_run_aborts_with_clear_message(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            local = root / "local"; local.mkdir()
-            backups = root / "backups"; backups.mkdir()
-            run_root = root / "runs"; run_root.mkdir()
-            make_fake_scriv(local, "MyBook", SAMPLE_BOOK)
-            zip_scriv_package(
-                local / "MyBook.scriv", backups / "MyBook.bak.zip",
-            )
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.local = self.root / "local"; self.local.mkdir()
+        self.run_root = self.root / "runs"; self.run_root.mkdir()
+        self.discovered = self.root / "discovered_backups"
+        self.discovered.mkdir()
+        make_fake_scriv(self.local, "MyBook", SAMPLE_BOOK)
+        zip_scriv_package(
+            self.local / "MyBook.scriv",
+            self.discovered / "MyBook.bak.zip",
+        )
 
-            argv = [
-                "scrivcheck",
-                "--local", str(local),
-                "--backups", str(backups),
-                "--run-root", str(run_root),
-            ]
-            # Force scrivener_installed() False
-            with mock.patch.object(vsb.sys, "platform", "darwin"), \
-                 mock.patch.object(sys, "argv", argv), \
-                 mock.patch("validate_scrivener_backups.scrivener_installed",
-                            return_value=False):
-                rc = vsb.main()
-                self.assertEqual(rc, 2)
+    def tearDown(self):
+        self.tmp.cleanup()
 
-    def test_dry_run_does_not_require_scrivener(self):
-        """Dry-run must succeed even with Scrivener absent — that's its
-        whole point."""
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            local = root / "local"; local.mkdir()
-            backups = root / "backups"; backups.mkdir()
-            run_root = root / "runs"; run_root.mkdir()
-            make_fake_scriv(local, "MyBook", SAMPLE_BOOK)
-            zip_scriv_package(
-                local / "MyBook.scriv", backups / "MyBook.bak.zip",
-            )
+    def test_main_uses_discovered_path_when_backups_flag_absent(self):
+        argv = [
+            "scrivcheck",
+            "--local", str(self.local),
+            "--run-root", str(self.run_root),
+            "--dry-run",
+        ]
+        with mock.patch.object(vsb.sys, "platform", "darwin"), \
+             mock.patch.object(sys, "argv", argv), \
+             mock.patch(
+                 "validate_scrivener_backups.discover_scrivener_backup_path",
+                 return_value=self.discovered,
+             ):
+            self.assertEqual(vsb.main(), 0)
+            run_dir = next(self.run_root.iterdir())
+            log_text = (run_dir / "logs" / "run.log").read_text()
+            self.assertIn(str(self.discovered), log_text)
+            self.assertIn("auto-discovered", log_text)
 
-            argv = [
-                "scrivcheck",
-                "--local", str(local),
-                "--backups", str(backups),
-                "--run-root", str(run_root),
-                "--dry-run",
-            ]
-            with mock.patch.object(vsb.sys, "platform", "darwin"), \
-                 mock.patch.object(sys, "argv", argv), \
-                 mock.patch("validate_scrivener_backups.scrivener_installed",
-                            return_value=False):
-                rc = vsb.main()
-                self.assertEqual(rc, 0)
+    def test_main_falls_back_when_discovery_returns_none_and_fallback_exists(self):
+        argv = [
+            "scrivcheck",
+            "--local", str(self.local),
+            "--run-root", str(self.run_root),
+            "--dry-run",
+        ]
+        with mock.patch.object(vsb.sys, "platform", "darwin"), \
+             mock.patch.object(sys, "argv", argv), \
+             mock.patch(
+                 "validate_scrivener_backups.discover_scrivener_backup_path",
+                 return_value=None,
+             ), \
+             mock.patch(
+                 "validate_scrivener_backups.FALLBACK_BACKUPS",
+                 self.discovered,
+             ):
+            self.assertEqual(vsb.main(), 0)
+            run_dir = next(self.run_root.iterdir())
+            log_text = (run_dir / "logs" / "run.log").read_text()
+            self.assertIn("fallback default", log_text)
 
 
 # ---------------------------------------------------------------------------
@@ -402,8 +446,6 @@ class ValidateBookGuardsTests(unittest.TestCase):
         log.addHandler(logging.NullHandler())
 
         patches = [
-            mock.patch("validate_scrivener_backups.scrivener_open"),
-            mock.patch("validate_scrivener_backups.scrivener_quit"),
             mock.patch("validate_scrivener_backups.scrivener_running",
                        return_value=False),
             mock.patch("validate_scrivener_backups.screencapture",

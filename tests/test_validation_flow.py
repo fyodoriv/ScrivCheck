@@ -60,8 +60,6 @@ class FlowTestCase(unittest.TestCase):
 
         # Patch all macOS-specific calls used by validate_book
         patches = [
-            mock.patch("validate_scrivener_backups.scrivener_open"),
-            mock.patch("validate_scrivener_backups.scrivener_quit"),
             mock.patch("validate_scrivener_backups.scrivener_running",
                        return_value=False),
             mock.patch("validate_scrivener_backups.screencapture",
@@ -108,6 +106,24 @@ class FlowTestCase(unittest.TestCase):
             f"DATA LOSS: {book.name} not present in any of "
             "[local, quarantine/originals, quarantine/safety-copies]",
         )
+
+
+class ScrivenerRunningWarningTests(FlowTestCase):
+    """If Scrivener is running when the live drill starts, the pre-flight
+    manifest could catch files mid-write. validate_book emits a clear
+    warning step but does NOT auto-quit (auto-quit could lose the user's
+    in-progress edits). The drill proceeds best-effort."""
+
+    def test_warning_step_recorded_when_scrivener_running(self):
+        with mock.patch("validate_scrivener_backups.scrivener_running",
+                        return_value=True):
+            book = BookResult(name="MyBook", project_path=str(self.scriv))
+            self.validator.validate_book(book)
+        step_names = [s["name"] for s in book.steps]
+        self.assertIn("scrivener_running_warning", step_names)
+        # Drill still proceeds and passes
+        self.assertEqual(book.status, "PASS",
+                         f"steps={book.steps} reason={book.failure_reason}")
 
 
 class HappyPathTests(FlowTestCase):

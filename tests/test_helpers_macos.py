@@ -77,85 +77,31 @@ class ScrivenerRunningTests(unittest.TestCase):
             self.assertFalse(vsb.scrivener_running())
 
 
-class ScrivenerQuitTests(unittest.TestCase):
-    def setUp(self):
-        self.log = logging.getLogger("quit-test")
-        self.log.addHandler(logging.NullHandler())
+class RemovedScrivenerHelpersTests(unittest.TestCase):
+    """Sanity checks that the broken Scrivener AppleScript helpers were
+    removed when we dropped the auto-save path.
 
-    def test_no_op_when_not_running(self):
-        with mock.patch("validate_scrivener_backups.scrivener_running", return_value=False), \
-             mock.patch("validate_scrivener_backups.osascript") as mosa:
-            vsb.scrivener_quit(self.log)
-            mosa.assert_not_called()
+    Scrivener 3's AppleScript dictionary rejects every ``save`` form
+    (``save front document``, ``save every document``, per-document
+    iteration — all -1708 errAEEventNotHandled). Worse, even
+    ``quit saving yes`` does not fire SCRBackUpOnManualSave: the hook
+    is gated on user-initiated Cmd+S only, so AppleScript can never
+    trigger a fresh backup. Validating the latest *existing* backup is
+    the honest, focus-respecting contract; manual save in Scrivener is
+    the prerequisite the user controls.
 
-    def test_runs_applescript_quit_saving_yes_when_running(self):
-        running_states = iter([True, False])  # running once, then exited
-        def fake_running():
-            return next(running_states)
-        with mock.patch("validate_scrivener_backups.scrivener_running", side_effect=fake_running), \
-             mock.patch("validate_scrivener_backups.osascript") as mosa, \
-             mock.patch("validate_scrivener_backups.time.sleep"):
-            vsb.scrivener_quit(self.log)
-            mosa.assert_called_once()
-            script = mosa.call_args.args[0]
-            self.assertIn("Scrivener", script)
-            # `quit saving yes` is the Standard-Suite verb that DOES work
-            # in Scrivener 3 (verified live; commit log has the receipts).
-            # Pin the literal so a refactor can't regress to a `save`-loop
-            # form that Scrivener doesn't understand.
-            self.assertIn("quit saving yes", script)
-            self.assertNotIn("save every document", script)
-            self.assertNotIn("repeat with", script)
+    These tests fail loudly if a future refactor reintroduces any of
+    these without first verifying it works against live Scrivener 3.
+    """
 
-    def test_warns_but_does_not_raise_when_applescript_fails(self):
-        # Even if AppleScript fails, if Scrivener has actually quit we
-        # should not propagate the error.
-        running = iter([True, False])
-        with mock.patch("validate_scrivener_backups.scrivener_running",
-                        side_effect=lambda: next(running)), \
-             mock.patch("validate_scrivener_backups.osascript",
-                        side_effect=subprocess.CalledProcessError(1, "osascript", "", "boom")), \
-             mock.patch("validate_scrivener_backups.time.sleep"):
-            vsb.scrivener_quit(self.log)  # must not raise
-
-    def test_raises_if_process_never_exits(self):
-        # Scrivener reports running forever
-        with mock.patch("validate_scrivener_backups.scrivener_running", return_value=True), \
-             mock.patch("validate_scrivener_backups.osascript"), \
-             mock.patch("validate_scrivener_backups.time.sleep"), \
-             mock.patch("validate_scrivener_backups.time.time",
-                        side_effect=[0, 1, 999]):  # start, loop check, deadline exceeded
-            with self.assertRaises(RuntimeError):
-                vsb.scrivener_quit(self.log)
-
-
-class ScrivenerOpenTests(unittest.TestCase):
-    def setUp(self):
-        self.log = logging.getLogger("open-test")
-        self.log.addHandler(logging.NullHandler())
-
-    def test_open_invokes_open_command_in_background(self):
-        """The `-g` flag is required so opening Scrivener doesn't steal
-        the user's window focus during the drill."""
-        with mock.patch("validate_scrivener_backups.run") as mrun, \
-             mock.patch("validate_scrivener_backups.time.sleep"):
-            vsb.scrivener_open(Path("/tmp/MyBook.scriv"), self.log)
-            args = mrun.call_args.args[0]
-            self.assertEqual(args[:4], ["open", "-g", "-a", "Scrivener"])
-            self.assertEqual(args[4], "/tmp/MyBook.scriv")
-
-    def test_save_active_function_does_not_exist(self):
-        """Sanity check: the broken save helper was removed.
-
-        Scrivener 3's AppleScript dictionary rejects every ``save`` form
-        we tried (``save front document``, ``save every document``, and
-        ``save d`` inside ``repeat with d in documents`` all raise -1708
-        errAEEventNotHandled). Saving is now ridden by ``quit saving yes``
-        which lives inside :func:`scrivener_quit`. If a future refactor
-        re-introduces a standalone save helper without first verifying it
-        works against Scrivener 3, this test fails to flag the risk.
-        """
+    def test_scrivener_save_active_does_not_exist(self):
         self.assertFalse(hasattr(vsb, "scrivener_save_active"))
+
+    def test_scrivener_open_does_not_exist(self):
+        self.assertFalse(hasattr(vsb, "scrivener_open"))
+
+    def test_scrivener_quit_does_not_exist(self):
+        self.assertFalse(hasattr(vsb, "scrivener_quit"))
 
 
 class ScreencaptureTests(unittest.TestCase):
