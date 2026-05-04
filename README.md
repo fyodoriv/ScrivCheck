@@ -65,38 +65,31 @@ ships.
 Requires Python 3.10+. No third-party dependencies.
 
 ```bash
-git clone https://github.com/cbrwizard/scrivener-backup-validator.git ~/apps/scrivener-backup-validator
-cd ~/apps/scrivener-backup-validator
-chmod +x validate_scrivener_backups.py
+git clone https://github.com/fyodoriv/scrivener-backup-validator.git ~/apps/scrivener-backup-validator
+chmod +x ~/apps/scrivener-backup-validator/validate_scrivener_backups.py
+mkdir -p ~/.local/bin
+ln -sf ~/apps/scrivener-backup-validator/validate_scrivener_backups.py \
+       ~/.local/bin/scrivcheck
 ```
 
-Optionally symlink it onto your PATH:
+`~/.local/bin` is on PATH on most modern macOS setups. If it isn't, add
+this line to your `~/.zshrc`:
 
 ```bash
-ln -s ~/apps/scrivener-backup-validator/validate_scrivener_backups.py \
-      /usr/local/bin/validate-scrivener-backups
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
 ## Usage
 
+After install, the entire tool is one word from anywhere in your terminal:
+
 ```bash
-# Full drill, all books — the default
-./validate_scrivener_backups.py
-
-# Just one book
-./validate_scrivener_backups.py --book "MyNovel"
-
-# Plan only, do not move or copy anything
-./validate_scrivener_backups.py --dry-run
-
-# Skip screenshots if you don't want to grant Screen Recording permission
-./validate_scrivener_backups.py --no-screenshots
-
-# Keep the quarantine even on success (useful when debugging)
-./validate_scrivener_backups.py --keep-quarantine
-
-# Different folders
-./validate_scrivener_backups.py \
+scrivcheck                       # full drill, all books — the default
+scrivcheck --book "MyNovel"      # just one book
+scrivcheck --dry-run             # plan only, do not move or copy anything
+scrivcheck --no-screenshots      # skip macOS Screen Recording permission
+scrivcheck --keep-quarantine     # keep the quarantine even on success
+scrivcheck \                     # different folders
     --local "/path/to/local/scriv/folder" \
     --backups "/path/to/backups"
 ```
@@ -114,6 +107,8 @@ Each run writes a timestamped directory to `~/scrivener-validation/`:
 ├── report.json            # full machine-readable state, every step,
 │                          #   every manifest, every diff
 ├── report.txt             # human-readable summary
+├── proof/
+│   └── MyBook.txt         # per-book verbose proof block (see below)
 ├── screenshots/
 │   ├── 000_00_preflight.png
 │   ├── 001_MyBook_01_opened.png
@@ -132,6 +127,46 @@ Each run writes a timestamped directory to `~/scrivener-validation/`:
 
 If everything passes, the quarantine is purged. If anything fails, it
 stays put and the path is loud-printed at the end of the run.
+
+### Proof block
+
+For every book, the tool prints (and saves to `proof/<book>.txt`) a
+loud, human-checkable evidence block. Sample (synthetic):
+
+```
+══════════════════════════════════════════════════════════════════════
+PROOF — MyBook
+══════════════════════════════════════════════════════════════════════
+
+Backup file (real, on disk, hashed in your presence):
+    path    /Users/.../Dropbox/Apps/Scrivener/MyBook.bak.zip
+    size    482,317 bytes
+    mtime   2026-05-03T14:30:18
+    sha256  9f3a1c…b274c1d8
+
+Pre-flight steady state (BEFORE the backup was touched):
+    3 content file(s), 47 bytes
+      Files/Data/UUID-1/content.rtf            16 B  3a7bd3e2dde7c1f0…
+      Files/Data/UUID-2/content.rtf            16 B  a5f9c2b1aa6c8d20…
+      Files/Data/UUID-3/content.rtf             8 B  e29cefe7e7a89c30…
+
+Post-restore manifest (project rebuilt FROM THE ZIP):
+    3 content file(s), 47 bytes
+      Files/Data/UUID-1/content.rtf            16 B  3a7bd3e2dde7c1f0…  ✓ MATCH
+      Files/Data/UUID-2/content.rtf            16 B  a5f9c2b1aa6c8d20…  ✓ MATCH
+      Files/Data/UUID-3/content.rtf             8 B  e29cefe7e7a89c30…  ✓ MATCH
+
+ATTESTATION
+    Status:     PASS
+    Verified:   3/3 content file(s) SHA-256 byte-identical to pre-flight
+    Hypothesis: HELD ✅
+    At:         2026-05-03T14:30:33
+══════════════════════════════════════════════════════════════════════
+```
+
+The SHA-256 of the zip is computed in front of you — there's no
+"trust me", just hashes you can re-verify with `shasum -a 256` on the
+backup file at any time.
 
 ## Failure modes
 

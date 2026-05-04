@@ -471,6 +471,149 @@ class RollbackFallbackTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+class EmitProofTests(unittest.TestCase):
+    """The verbose proof block is the user-facing evidence that a backup
+    is real and restorable. Lock down its shape with tests so a refactor
+    can't quietly drop the per-file SHA-256 lines or the attestation."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.local = root / "local"
+        self.backups = root / "backups"
+        self.run_dir = root / "run"
+        self.local.mkdir()
+        self.backups.mkdir()
+        (self.run_dir / "logs").mkdir(parents=True)
+
+        self.scriv = make_fake_scriv(self.local, "MyBook", SAMPLE_BOOK)
+        self.zip_path = zip_scriv_package(
+            self.scriv, self.backups / "MyBook.bak.zip"
+        )
+
+        log = logging.getLogger("proof-test")
+        log.addHandler(logging.NullHandler())
+        self.v = vsb.Validator(
+            local_dir=self.local, backup_dir=self.backups,
+            run_dir=self.run_dir, log=log,
+            screenshots=False, dry_run=False,
+        )
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _book_with_full_manifests(self, status="PASS"):
+        book = vsb.BookResult(name="MyBook", project_path=str(self.scriv))
+        book.backup_zip = str(self.zip_path)
+        book.pre_manifest = vsb.compute_manifest(self.scriv)
+        book.post_manifest = vsb.compute_manifest(self.scriv)
+        book.status = status
+        return book
+
+    def _proof_text(self, book):
+        self.v._emit_proof(book)
+        return (self.run_dir / "proof" / f"{book.name}.txt").read_text()
+
+    def test_pass_proof_contains_zip_sha_and_match_lines(self):
+        book = self._book_with_full_manifests("PASS")
+        text = self._proof_text(book)
+
+        # Zip metadata
+        self.assertIn("Backup file", text)
+        self.assertIn("sha256", text)
+        # Per-file SHA-256 prefix (first 16 hex chars) must appear
+        for entry in book.pre_manifest.files:
+            if entry.relpath.startswith("Files/Data/"):
+                self.assertIn(entry.sha256[:16], text,
+                              f"prefix {entry.sha256[:16]} not found for {entry.relpath}")
+        # Every content file must show a MATCH
+        content_count = len(book.pre_manifest.content_entries())
+        self.assertEqual(text.count("✓ MATCH"), content_count,
+                         f"expected {content_count} MATCHes, got\n{text}")
+        # Attestation
+        self.assertIn("ATTESTATION", text)
+        self.assertIn("HELD", text)
+
+    def test_fail_proof_marks_mismatch(self):
+        book = self._book_with_full_manifests("FAIL")
+        # Tamper one post-manifest entry to force a mismatch
+        for f in book.post_manifest.files:
+            if f.relpath.startswith("Files/Data/"):
+                f.sha256 = "0" * 64
+                break
+        text = self._proof_text(book)
+        self.assertIn("✗ MISMATCH", text)
+        self.assertIn("REJECTED", text)
+        self.assertIn("Mismatch:", text)
+
+    def test_fail_proof_marks_missing(self):
+        book = self._book_with_full_manifests("FAIL")
+        # Drop one content file from the post-manifest entirely
+        target = next(f.relpath for f in book.pre_manifest.files
+                      if f.relpath.startswith("Files/Data/"))
+        book.post_manifest.files = [
+            f for f in book.post_manifest.files if f.relpath != target
+        ]
+        text = self._proof_text(book)
+        self.assertIn("✗ MISSING", text)
+        self.assertIn("Missing:", text)
+
+    def test_failure_before_restore_emits_note(self):
+        """If we never got to a post-restore manifest, the proof block
+        should still be useful — show the zip + pre-flight + a NOTE
+        explaining why the drill aborted."""
+        book = vsb.BookResult(name="MyBook", project_path=str(self.scriv))
+        book.backup_zip = str(self.zip_path)
+        book.pre_manifest = vsb.compute_manifest(self.scriv)
+        book.status = "FAIL"
+        book.failure_reason = "No backup zip found"
+        text = self._proof_text(book)
+        self.assertIn("NOTE", text)
+        self.assertIn("No backup zip found", text)
+        # And the zip+pre-flight sections should still be present
+        self.assertIn("Pre-flight steady state", text)
+
+    def test_proof_skips_zip_section_when_no_backup_known(self):
+        book = vsb.BookResult(name="MyBook", project_path=str(self.scriv))
+        book.pre_manifest = vsb.compute_manifest(self.scriv)
+        book.status = "FAIL"
+        book.failure_reason = "discovery error"
+        text = self._proof_text(book)
+        # No backup info → no zip line
+        self.assertNotIn("sha256", text.lower().split("attestation")[0])
+
+    def test_proof_skips_zip_section_when_zip_path_missing_on_disk(self):
+        book = vsb.BookResult(name="MyBook", project_path=str(self.scriv))
+        book.backup_zip = str(self.backups / "vanished.zip")
+        book.pre_manifest = vsb.compute_manifest(self.scriv)
+        book.status = "FAIL"
+        text = self._proof_text(book)
+        self.assertNotIn("vanished.zip", text)  # no path printed
+
+    def test_dry_run_skipped_book_emits_no_proof(self):
+        # A SKIPPED book never produces a proof artifact — the drill didn't
+        # actually do anything to prove. The validate_book caller is
+        # responsible for the gate; here we exercise the same gate at the
+        # full-flow level.
+        with mock.patch("validate_scrivener_backups.scrivener_open"), \
+             mock.patch("validate_scrivener_backups.scrivener_save_active"), \
+             mock.patch("validate_scrivener_backups.scrivener_quit"), \
+             mock.patch("validate_scrivener_backups.scrivener_running",
+                        return_value=False), \
+             mock.patch("validate_scrivener_backups.screencapture",
+                        return_value=None), \
+             mock.patch("validate_scrivener_backups.ensure_locally_available"):
+            v = vsb.Validator(
+                local_dir=self.local, backup_dir=self.backups,
+                run_dir=self.run_dir, log=self.v.log,
+                screenshots=False, dry_run=True,
+            )
+            book = vsb.BookResult(name="MyBook", project_path=str(self.scriv))
+            v.validate_book(book)
+            self.assertEqual(book.status, "SKIPPED")
+            self.assertFalse((self.run_dir / "proof").exists())
+
+
 class ScriptEntryTests(unittest.TestCase):
     def test_running_module_as_script_invokes_main(self):
         """Cover the `if __name__ == '__main__'` guard."""

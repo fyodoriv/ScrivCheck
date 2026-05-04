@@ -620,6 +620,140 @@ class Validator:
             # that fails, from the safety copy) into the local folder.
             self._rollback(book, project_path, quarantined_original, safety_copy)
 
+        # Emit verbose proof unconditionally (except for dry-run, which
+        # didn't actually do anything to prove).
+        if book.status != "SKIPPED":
+            self._emit_proof(book)
+
+    def _emit_proof(self, book: BookResult) -> None:
+        """
+        Loud, human-checkable evidence that a backup is real and restorable.
+
+        Prints the per-book proof block to the log (i.e. stdout + run.log)
+        AND writes it to ``<run_dir>/proof/<book>.txt`` so the user has a
+        durable artifact, not just a console blip.
+
+        The block contains:
+          • SHA-256 of the backup zip itself (the literal file on disk)
+          • the pre-flight content manifest (steady state)
+          • the post-restore content manifest with per-file MATCH/MISMATCH
+          • an attestation footer stating whether the hypothesis held
+        """
+        lines: list[str] = []
+        bar = "═" * 70
+        lines.append(bar)
+        lines.append(f"PROOF — {book.name}")
+        lines.append(bar)
+
+        # 1. The backup zip itself, hashed in front of the user.
+        if book.backup_zip:
+            zp = Path(book.backup_zip)
+            if zp.exists():
+                stat = zp.stat()
+                mtime = datetime.fromtimestamp(stat.st_mtime).isoformat(
+                    timespec="seconds"
+                )
+                lines.append("")
+                lines.append("Backup file (real, on disk, hashed in your presence):")
+                lines.append(f"    path    {zp}")
+                lines.append(f"    size    {stat.st_size:,} bytes")
+                lines.append(f"    mtime   {mtime}")
+                lines.append(f"    sha256  {file_sha256(zp)}")
+
+        pre = book.pre_manifest.content_entries() if book.pre_manifest else {}
+        post = book.post_manifest.content_entries() if book.post_manifest else {}
+
+        # 2. Pre-flight steady state.
+        if pre:
+            pre_bytes = sum(e.size for e in pre.values())
+            lines.append("")
+            lines.append(
+                "Pre-flight steady state (BEFORE the backup was touched):"
+            )
+            lines.append(
+                f"    {len(pre)} content file(s), {pre_bytes:,} bytes"
+            )
+            for relpath in sorted(pre):
+                e = pre[relpath]
+                lines.append(
+                    f"      {relpath:<48s} {e.size:>9,} B  {e.sha256[:16]}…"
+                )
+
+        # 3. Post-restore manifest with per-file verdict.
+        if pre and post:
+            post_bytes = sum(e.size for e in post.values())
+            lines.append("")
+            lines.append(
+                "Post-restore manifest (project rebuilt FROM THE ZIP):"
+            )
+            lines.append(
+                f"    {len(post)} content file(s), {post_bytes:,} bytes"
+            )
+            matches = mismatches = missing = 0
+            for relpath in sorted(pre):
+                pre_e = pre[relpath]
+                post_e = post.get(relpath)
+                if post_e is None:
+                    lines.append(
+                        f"      {relpath:<48s} {'':>9}    "
+                        f"{'':<16}  ✗ MISSING after restore"
+                    )
+                    missing += 1
+                elif post_e.sha256 != pre_e.sha256:
+                    lines.append(
+                        f"      {relpath:<48s} {post_e.size:>9,} B  "
+                        f"{post_e.sha256[:16]}…  ✗ MISMATCH "
+                        f"(was {pre_e.sha256[:8]}, got {post_e.sha256[:8]})"
+                    )
+                    mismatches += 1
+                else:
+                    lines.append(
+                        f"      {relpath:<48s} {post_e.size:>9,} B  "
+                        f"{post_e.sha256[:16]}…  ✓ MATCH"
+                    )
+                    matches += 1
+
+            # 4. Attestation footer.
+            verdict = "HELD ✅" if book.status == "PASS" else "REJECTED ❌"
+            lines.append("")
+            lines.append("ATTESTATION")
+            lines.append(f"    Status:     {book.status}")
+            lines.append(
+                f"    Verified:   {matches}/{len(pre)} content file(s) "
+                "SHA-256 byte-identical to pre-flight"
+            )
+            if mismatches:
+                lines.append(
+                    f"    Mismatch:   {mismatches} file(s) differ from pre-flight"
+                )
+            if missing:
+                lines.append(
+                    f"    Missing:    {missing} file(s) absent after restore"
+                )
+            lines.append(f"    Hypothesis: {verdict}")
+            lines.append(
+                f"    At:         {datetime.now().isoformat(timespec='seconds')}"
+            )
+
+        if book.failure_reason and not post:
+            lines.append("")
+            lines.append("NOTE")
+            lines.append(
+                "    Drill aborted before a post-restore manifest could be "
+                "computed."
+            )
+            lines.append(f"    Reason: {book.failure_reason}")
+
+        lines.append(bar)
+
+        for line in lines:
+            self.log.info(line)
+        proof_dir = self.run_dir / "proof"
+        proof_dir.mkdir(parents=True, exist_ok=True)
+        (proof_dir / f"{book.name}.txt").write_text(
+            "\n".join(lines) + "\n"
+        )
+
     def _rollback(
         self,
         book: BookResult,
