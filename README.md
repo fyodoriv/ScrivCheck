@@ -86,12 +86,12 @@ export PATH="$HOME/.local/bin:$PATH"
 After install, the entire tool is one word from anywhere in your terminal:
 
 ```bash
-scrivcheck                       # validate the LATEST book (most-recently
-                                 #   modified .scriv) — the default
-scrivcheck --all                 # validate every .scriv in the local folder
+scrivcheck                       # validate ALL .scriv books — the default
+scrivcheck --latest              # validate only the most-recently-modified book
+scrivcheck --all                 # same as default (all books)
 scrivcheck --book "MyNovel"      # validate one specific book
 scrivcheck --dry-run             # plan only — does NOT touch Scrivener
-scrivcheck --screenshots         # also capture full-screen screenshots
+scrivcheck --screenshots         # extra screenshots at each visible step
 scrivcheck --keep-quarantine     # keep the quarantine even on success
 scrivcheck \                     # different folders
     --local "/path/to/local/scriv/folder" \
@@ -100,9 +100,9 @@ scrivcheck \                     # different folders
 
 ### Defaults that respect your workflow
 
-- **Latest book only**, by default. Most of the time you only care about
-  the project you're actively writing in. Use `--all` when you want a
-  full sweep (e.g. quarterly recovery drill).
+- **All books**, by default. Every `.scriv` in the local folder is validated
+  in one run. Use `--latest` to restrict to the project you're actively
+  writing in, or `--book "Name"` for one specific book.
 - **Backup path auto-discovered.** If `--backups` is omitted, the path
   is read from Scrivener's preferences
   (`SCRAutomaticBackupPath` in `com.literatureandlatte.scrivener3`).
@@ -120,10 +120,11 @@ scrivcheck \                     # different folders
   steals focus, or needs Automation permission. Save manually in
   Scrivener (`⌘S`) before running `scrivcheck` if you want a fresh
   backup validated.
-- **Screenshots off by default**. The PROOF block is built from
-  SHA-256 hashes, not pixels — screenshots are decorative. Pass
-  `--screenshots` if you want them and have granted Screen Recording
-  permission.
+- **Confirmation screenshot always taken** for the most-recently-edited
+  book. This screenshot captures the terminal at the moment the proof
+  is printed, giving visual confirmation that the drill ran. It requires
+  Screen Recording permission in *System Settings → Privacy & Security*.
+  Pass `--screenshots` for additional screenshots at each intermediate step.
 - **Dry-run is a pure plan**. Hashes the backup zip, computes the
   pre-flight manifest of the live project, prints the plan. No file
   is moved, nothing destructive happens.

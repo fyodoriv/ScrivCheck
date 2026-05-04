@@ -900,25 +900,30 @@ class Validator:
 
     def _emit_proof(self, book: BookResult) -> None:
         """
-        Loud, human-checkable evidence that a backup is real and restorable.
+        Write per-book proof to ``<run_dir>/proof/<book>.txt`` (full detail)
+        and print a brief summary to stdout.
 
-        Prints the per-book proof block to the log (i.e. stdout + run.log)
-        AND writes it to ``<run_dir>/proof/<book>.txt`` so the user has a
-        durable artifact, not just a console blip.
-
-        The block contains:
-          • SHA-256 of the backup zip itself (the literal file on disk)
-          • the pre-flight content manifest (steady state)
-          • the post-restore content manifest with per-file MATCH/MISMATCH
-          • an attestation footer stating whether the hypothesis held
+        Full detail (file + debug log) — every file hash, every verdict.
+        Brief summary (stdout / info log) — backup hash, file counts,
+        attestation. Keeps terminal output proportional regardless of project
+        size (667 files = same ~12 lines as 3 files).
         """
-        lines: list[str] = []
+        lines: list[str] = []   # full detail → file + debug log
+        brief: list[str] = []   # summary only → stdout (info log)
         bar = "═" * 70
-        lines.append(bar)
-        lines.append(f"PROOF — {book.name}")
-        lines.append(bar)
 
-        # 1. The backup zip itself, hashed in front of the user.
+        def both(*ls: str) -> None:
+            for ln in ls:
+                lines.append(ln)
+                brief.append(ln)
+
+        def full(*ls: str) -> None:
+            for ln in ls:
+                lines.append(ln)
+
+        both(bar, f"PROOF — {book.name}", bar)
+
+        # 1. Backup zip — full detail in file, one-line digest on stdout.
         if book.backup_zip:
             zp = Path(book.backup_zip)
             if zp.exists():
@@ -926,124 +931,152 @@ class Validator:
                 mtime = datetime.fromtimestamp(stat.st_mtime).isoformat(
                     timespec="seconds"
                 )
-                lines.append("")
-                lines.append("Backup file (real, on disk, hashed in your presence):")
-                lines.append(f"    path    {zp}")
-                lines.append(f"    size    {stat.st_size:,} bytes")
-                lines.append(f"    mtime   {mtime}")
-                lines.append(f"    sha256  {file_sha256(zp)}")
+                digest = file_sha256(zp)
+                full(
+                    "",
+                    "Backup file (real, on disk, hashed in your presence):",
+                    f"    path    {zp}",
+                    f"    size    {stat.st_size:,} bytes",
+                    f"    mtime   {mtime}",
+                    f"    sha256  {digest}",
+                )
+                both(
+                    "",
+                    f"Backup: {zp.name}  ({stat.st_size:,} bytes)",
+                    f"        sha256 {digest}",
+                )
 
         pre = book.pre_manifest.content_entries() if book.pre_manifest else {}
         post = book.post_manifest.content_entries() if book.post_manifest else {}
 
-        # 2. Pre-flight steady state.
+        # 2. Pre-flight — per-file listing in file only; count on stdout.
         if pre:
             pre_bytes = sum(e.size for e in pre.values())
-            lines.append("")
-            lines.append(
-                "Pre-flight steady state (BEFORE the backup was touched):"
-            )
-            lines.append(
-                f"    {len(pre)} content file(s), {pre_bytes:,} bytes"
+            full(
+                "",
+                "Pre-flight steady state (BEFORE the backup was touched):",
+                f"    {len(pre)} content file(s), {pre_bytes:,} bytes",
             )
             for relpath in sorted(pre):
                 e = pre[relpath]
-                lines.append(
-                    f"      {relpath:<48s} {e.size:>9,} B  {e.sha256[:16]}…"
-                )
+                full(f"      {relpath:<48s} {e.size:>9,} B  {e.sha256[:16]}…")
+            brief.append(
+                f"Pre-flight:   {len(pre)} content file(s), {pre_bytes:,} bytes"
+            )
 
-        # 3. Post-restore manifest with per-file verdict.
+        # 3. Post-restore — per-file verdicts in file only; counts on stdout.
         if pre and post:
             post_bytes = sum(e.size for e in post.values())
-            lines.append("")
-            lines.append(
-                "Post-restore manifest (project rebuilt FROM THE ZIP):"
-            )
-            lines.append(
-                f"    {len(post)} content file(s), {post_bytes:,} bytes"
+            full(
+                "",
+                "Post-restore manifest (project rebuilt FROM THE ZIP):",
+                f"    {len(post)} content file(s), {post_bytes:,} bytes",
             )
             matches = mismatches = missing = 0
             for relpath in sorted(pre):
                 pre_e = pre[relpath]
                 post_e = post.get(relpath)
                 if post_e is None:
-                    lines.append(
+                    full(
                         f"      {relpath:<48s} {'':>9}    "
                         f"{'':<16}  ✗ MISSING after restore"
                     )
                     missing += 1
                 elif post_e.sha256 != pre_e.sha256:
-                    lines.append(
+                    full(
                         f"      {relpath:<48s} {post_e.size:>9,} B  "
                         f"{post_e.sha256[:16]}…  ✗ MISMATCH "
                         f"(was {pre_e.sha256[:8]}, got {post_e.sha256[:8]})"
                     )
                     mismatches += 1
                 else:
-                    lines.append(
+                    full(
                         f"      {relpath:<48s} {post_e.size:>9,} B  "
                         f"{post_e.sha256[:16]}…  ✓ MATCH"
                     )
                     matches += 1
 
-            # 4. Attestation footer.
+            if mismatches or missing:
+                brief.append(
+                    f"Post-restore: {matches}/{len(pre)} ✓ match  "
+                    f"{mismatches} ✗ mismatch  {missing} ✗ missing"
+                )
+            else:
+                brief.append(
+                    f"Post-restore: {matches}/{len(pre)} SHA-256 byte-identical ✓"
+                )
+
+            # 4. Attestation — same on stdout and in file.
             verdict = "HELD ✅" if book.status == "PASS" else "REJECTED ❌"
-            lines.append("")
-            lines.append("ATTESTATION")
-            lines.append(f"    Status:     {book.status}")
-            lines.append(
-                f"    Verified:   {matches}/{len(pre)} content file(s) "
-                "SHA-256 byte-identical to pre-flight"
-            )
+            attest = [
+                "",
+                "ATTESTATION",
+                f"    Status:     {book.status}",
+                (
+                    f"    Verified:   {matches}/{len(pre)} content file(s) "
+                    "SHA-256 byte-identical to pre-flight"
+                ),
+            ]
             if mismatches:
-                lines.append(
+                attest.append(
                     f"    Mismatch:   {mismatches} file(s) differ from pre-flight"
                 )
             if missing:
-                lines.append(
+                attest.append(
                     f"    Missing:    {missing} file(s) absent after restore"
                 )
-            lines.append(f"    Hypothesis: {verdict}")
-            lines.append(
-                f"    At:         {datetime.now().isoformat(timespec='seconds')}"
-            )
+            attest += [
+                f"    Hypothesis: {verdict}",
+                f"    At:         {datetime.now().isoformat(timespec='seconds')}",
+            ]
+            both(*attest)
 
-        # Dry-run gets its own attestation: state what was inspected,
-        # don't pretend a hypothesis was tested.
+        # Dry-run attestation — always brief (no per-file section to skip).
         if book.status == "SKIPPED" and not post:
-            lines.append("")
-            lines.append("DRY-RUN ATTESTATION")
-            lines.append("    Status:     SKIPPED (plan only, no restore)")
             inspected = []
             if book.backup_zip and Path(book.backup_zip).exists():
                 inspected.append("backup zip presence + SHA-256")
             if pre:
                 inspected.append("live folder pre-flight manifest")
-            lines.append(
-                f"    Inspected:  {', '.join(inspected) if inspected else 'nothing'}"
-            )
-            lines.append(
-                "    Note:       no save was triggered, no files were moved."
+            both(
+                "",
+                "DRY-RUN ATTESTATION",
+                "    Status:     SKIPPED (plan only, no restore)",
+                f"    Inspected:  {', '.join(inspected) if inspected else 'nothing'}",
+                "    Note:       no save was triggered, no files were moved.",
             )
 
         if book.status == "FAIL" and not post:
-            lines.append("")
-            lines.append("NOTE")
-            lines.append(
-                "    Drill aborted before a post-restore manifest could be "
-                "computed."
+            both(
+                "",
+                "NOTE",
+                "    Drill aborted before a post-restore manifest could be computed.",
+                f"    Reason: {book.failure_reason}",
             )
-            lines.append(f"    Reason: {book.failure_reason}")
 
-        lines.append(bar)
+        both(bar)
 
+        # Full detail → debug log + proof file (durable artifact).
         for line in lines:
-            self.log.info(line)
+            self.log.debug(line)
         proof_dir = self.run_dir / "proof"
         proof_dir.mkdir(parents=True, exist_ok=True)
-        (proof_dir / f"{book.name}.txt").write_text(
-            "\n".join(lines) + "\n"
-        )
+        (proof_dir / f"{book.name}.txt").write_text("\n".join(lines) + "\n")
+
+        # Brief summary → stdout (info level).
+        for line in brief:
+            self.log.info(line)
+
+    def confirmation_shot(self, book: BookResult) -> None:
+        """Take a screenshot unconditionally (ignores screenshots_enabled).
+        Used for the latest-edited book to give visual confirmation."""
+        self.shot_counter += 1
+        slug = re.sub(r"[^a-zA-Z0-9._-]+", "_", book.name).strip("_")
+        path = self.shots_dir / f"{self.shot_counter:03d}_confirmation_{slug}.png"
+        result = screencapture(path, self.log, enabled=True)
+        if result:
+            book.screenshots.append(result)
+            self.log.info("Confirmation screenshot: %s", path)
 
     def _rollback(
         self,
@@ -1152,14 +1185,16 @@ def main() -> int:
     parser.add_argument("--run-root", type=Path, default=DEFAULT_RUN_ROOT)
     parser.add_argument(
         "--book", type=str, default=None,
-        help="Validate only this book (by name, no .scriv). Overrides --all.",
+        help="Validate only this book (by name, no .scriv). Overrides scope flags.",
     )
-    parser.add_argument(
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument(
         "--all", action="store_true",
-        help=(
-            "Validate every .scriv in the local folder. "
-            "Default is to validate only the most-recently-modified one."
-        ),
+        help="Validate every .scriv in the local folder (default behaviour).",
+    )
+    scope.add_argument(
+        "--latest", action="store_true",
+        help="Validate only the most-recently-modified .scriv.",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -1230,7 +1265,7 @@ def main() -> int:
     )
     validator.shot("00_preflight")
 
-    mode = "all" if args.all else "latest"
+    mode = "latest" if args.latest else "all"
     books = validator.discover_books(only=args.book, mode=mode)
     if not books:
         log.warning("No .scriv projects found.")
@@ -1242,8 +1277,15 @@ def main() -> int:
     )
     log.info("Validating %d book(s): %s", len(books), selection)
 
+    # Identify the most-recently-edited book for the confirmation screenshot.
+    latest_book_name = max(
+        books, key=lambda b: Path(b.project_path).stat().st_mtime
+    ).name
+
     for book in books:
         validator.validate_book(book)
+        if book.name == latest_book_name:
+            validator.confirmation_shot(book)
 
     # Final report
     report_path = write_report(run_dir, books)

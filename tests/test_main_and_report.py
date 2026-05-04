@@ -313,6 +313,121 @@ class ShotTests(unittest.TestCase):
                 self.assertEqual(v.shot("preflight"), "/tmp/x.png")
 
 
+class ConfirmationShotTests(unittest.TestCase):
+    """confirmation_shot always calls screencapture with enabled=True,
+    regardless of the Validator's screenshots_enabled flag."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.run_dir = root / "run"
+        (self.run_dir / "logs").mkdir(parents=True)
+        self.log = logging.getLogger(f"cs-{id(self)}")
+        self.log.addHandler(logging.NullHandler())
+        self.v = vsb.Validator(
+            local_dir=root / "local",
+            backup_dir=root / "backups",
+            run_dir=self.run_dir,
+            log=self.log,
+            screenshots=False,   # screenshots OFF
+            dry_run=False,
+        )
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_confirmation_shot_calls_screencapture_with_enabled_true(self):
+        """confirmation_shot ignores screenshots_enabled and always captures."""
+        calls = []
+        def fake_sc(path, log, enabled=True):
+            calls.append(enabled)
+            return None
+
+        book = vsb.BookResult(name="MyBook", project_path="/x/MyBook.scriv")
+        with mock.patch("validate_scrivener_backups.screencapture",
+                        side_effect=fake_sc):
+            self.v.confirmation_shot(book)
+        self.assertEqual(calls, [True])
+
+    def test_confirmation_shot_appends_path_to_book_screenshots(self):
+        """When screencapture succeeds, the path is added to book.screenshots."""
+        fake_path = str(self.run_dir / "screenshots" / "001_confirmation_MyBook.png")
+        book = vsb.BookResult(name="MyBook", project_path="/x/MyBook.scriv")
+        with mock.patch("validate_scrivener_backups.screencapture",
+                        return_value=fake_path):
+            self.v.confirmation_shot(book)
+        self.assertIn(fake_path, book.screenshots)
+
+
+class LatestFlagTests(unittest.TestCase):
+    """--latest flag restricts validation to the most-recently-modified book."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.local = self.root / "local"
+        self.backups = self.root / "backups"
+        self.run_root = self.root / "runs"
+        self.local.mkdir()
+        self.backups.mkdir()
+        self.run_root.mkdir()
+
+        import time
+        self.scriv_a = make_fake_scriv(self.local, "ABook", SAMPLE_BOOK)
+        time.sleep(0.01)
+        self.scriv_b = make_fake_scriv(self.local, "ZBook", SAMPLE_BOOK)
+        zip_scriv_package(self.scriv_a, self.backups / "ABook.bak.zip")
+        zip_scriv_package(self.scriv_b, self.backups / "ZBook.bak.zip")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _argv(self, *extra):
+        return [
+            "validate_scrivener_backups.py",
+            "--local", str(self.local),
+            "--backups", str(self.backups),
+            "--run-root", str(self.run_root),
+            *extra,
+        ]
+
+    def test_latest_flag_validates_only_most_recent(self):
+        patches = [
+            mock.patch.object(vsb.sys, "platform", "darwin"),
+            mock.patch("validate_scrivener_backups.scrivener_running", return_value=False),
+            mock.patch("validate_scrivener_backups.screencapture", return_value=None),
+            mock.patch("validate_scrivener_backups.ensure_locally_available"),
+        ]
+        with mock.patch.object(sys, "argv", self._argv("--latest")):
+            for p in patches:
+                p.start()
+            self.addCleanup(lambda: [p.stop() for p in patches])
+            rc = vsb.main()
+        self.assertEqual(rc, 0)
+        run_dir = next(self.run_root.iterdir())
+        report = json.loads((run_dir / "report.json").read_text())
+        self.assertEqual(report["totals"]["books"], 1)
+        # ZBook was created last so it's the latest
+        self.assertEqual(report["books"][0]["name"], "ZBook")
+
+    def test_default_mode_validates_all_books(self):
+        patches = [
+            mock.patch.object(vsb.sys, "platform", "darwin"),
+            mock.patch("validate_scrivener_backups.scrivener_running", return_value=False),
+            mock.patch("validate_scrivener_backups.screencapture", return_value=None),
+            mock.patch("validate_scrivener_backups.ensure_locally_available"),
+        ]
+        with mock.patch.object(sys, "argv", self._argv()):
+            for p in patches:
+                p.start()
+            self.addCleanup(lambda: [p.stop() for p in patches])
+            rc = vsb.main()
+        self.assertEqual(rc, 0)
+        run_dir = next(self.run_root.iterdir())
+        report = json.loads((run_dir / "report.json").read_text())
+        self.assertEqual(report["totals"]["books"], 2)
+
+
 class StagingDirReuseTests(unittest.TestCase):
     """If a previous run left a staging dir behind, validate_book should
     nuke it before extracting — otherwise the rglob would pick up stale
