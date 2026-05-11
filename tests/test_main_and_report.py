@@ -885,6 +885,90 @@ class WriteHtmlReportTests(unittest.TestCase):
         out = vsb.write_html_report(self.run_dir, [], screenshot_books=None)
         self.assertIn("all validated books", out.read_text())
 
+    def test_diff_failure_shows_missing_and_changed_counts(self):
+        book = self._book(
+            status="FAIL",
+            diff_summary={
+                "ok": False,
+                "content_missing": ["Files/Data/x/content.rtf"],
+                "content_changed": [
+                    {"relpath": "Files/Data/y/content.rtf",
+                     "pre_sha256": "a", "post_sha256": "b",
+                     "pre_size": 1, "post_size": 1},
+                ],
+                "content_added": [],
+                "noncontent_missing": [], "noncontent_added": [],
+                "pre_total_size": 0, "post_total_size": 0,
+                "pre_file_count": 0, "post_file_count": 0,
+            },
+        )
+        out = vsb.write_html_report(self.run_dir, [book])
+        text = out.read_text()
+        self.assertIn("1 missing", text)
+        self.assertIn("1 changed", text)
+
+    def test_long_snippet_gets_ellipsis_prefix(self):
+        book = self._book(status="PASS")
+        book.latest_content_snippet = "x" * 500
+        out = vsb.write_html_report(self.run_dir, [book])
+        self.assertIn("…", out.read_text())
+
+
+class OpenInBrowserTests(unittest.TestCase):
+    def test_exception_is_swallowed(self):
+        with mock.patch("scrivcheck.subprocess.run",
+                        side_effect=OSError("no browser")):
+            vsb.open_in_browser(Path("/tmp/report.html"))  # must not raise
+
+
+class ScreenshotBookArgTests(unittest.TestCase):
+    """Cover --screenshot-all-books and --screenshot-books CLI branches."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.local = root / "local"; self.local.mkdir()
+        self.backups = root / "backups"; self.backups.mkdir()
+        self.run_root = root / "runs"; self.run_root.mkdir()
+        scriv = make_fake_scriv(self.local, "MyBook", SAMPLE_BOOK)
+        zip_scriv_package(scriv, self.backups / "MyBook.bak.zip")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _argv(self, *extra):
+        return [
+            "scrivcheck",
+            "--local", str(self.local),
+            "--backups", str(self.backups),
+            "--run-root", str(self.run_root),
+            *extra,
+        ]
+
+    def _patches(self):
+        return [
+            mock.patch.object(vsb.sys, "platform", "darwin"),
+            mock.patch("scrivcheck.scrivener_running", return_value=False),
+            mock.patch("scrivcheck.screencapture", return_value=None),
+            mock.patch.object(vsb.Validator, "_scrivener_shot"),
+            mock.patch("scrivcheck.ensure_locally_available"),
+            mock.patch("scrivcheck.open_in_browser"),
+        ]
+
+    def test_screenshot_all_books_flag(self):
+        with mock.patch.object(sys, "argv", self._argv("--screenshot-all-books")):
+            for p in self._patches():
+                p.start()
+            self.addCleanup(lambda: [p.stop() for p in self._patches()])
+            self.assertEqual(vsb.main(), 0)
+
+    def test_screenshot_books_custom_list(self):
+        with mock.patch.object(sys, "argv", self._argv("--screenshot-books", "MyBook")):
+            for p in self._patches():
+                p.start()
+            self.addCleanup(lambda: [p.stop() for p in self._patches()])
+            self.assertEqual(vsb.main(), 0)
+
 
 class ScriptEntryTests(unittest.TestCase):
     def test_running_module_as_script_invokes_main(self):

@@ -162,6 +162,22 @@ class ScrivenerShotFilterTests(unittest.TestCase):
             screenshot_books=screenshot_books,
         )
 
+    def test_screenshots_disabled_returns_immediately(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch("scrivcheck.run") as mrun:
+            run_dir = Path(tmp) / "run"
+            (run_dir / "logs").mkdir(parents=True)
+            log = logging.getLogger(f"ssf-dis-{id(self)}")
+            log.addHandler(logging.NullHandler())
+            v = vsb.Validator(
+                local_dir=Path(tmp), backup_dir=Path(tmp),
+                run_dir=run_dir, log=log, screenshots=False,
+            )
+            book = vsb.BookResult(name="X", project_path="/x.scriv")
+            v._scrivener_shot(book, Path("/x.scriv"))
+            mrun.assert_not_called()
+            self.assertEqual(book.screenshots, [])
+
     def test_unlisted_book_skips_screenshot(self):
         with tempfile.TemporaryDirectory() as tmp, \
              mock.patch("scrivcheck.scrivener_running", return_value=False), \
@@ -242,6 +258,45 @@ class ScrivenerShotFilterTests(unittest.TestCase):
             ]
             self.assertTrue(any("close document" in " ".join(c) for c in osascript_calls))
             self.assertFalse(any("quit" in " ".join(c) for c in osascript_calls))
+
+    def test_screenshot_appended_when_screencapture_returns_path(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch("scrivcheck.scrivener_running", return_value=False), \
+             mock.patch("scrivcheck.screencapture", return_value="/tmp/shot.png"), \
+             mock.patch("scrivcheck.run") as mrun, \
+             mock.patch("scrivcheck.time"):
+            mrun.return_value = _completed()
+            v = self._make_validator(tmp, None)
+            book = vsb.BookResult(name="X", project_path="/x.scriv")
+            v._scrivener_shot(book, Path("/x.scriv"))
+            self.assertEqual(book.screenshots, ["/tmp/shot.png"])
+
+    def test_exception_in_open_is_logged_not_raised(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch("scrivcheck.scrivener_running", return_value=False), \
+             mock.patch("scrivcheck.screencapture", return_value=None), \
+             mock.patch("scrivcheck.run", side_effect=OSError("no such app")), \
+             mock.patch("scrivcheck.time"):
+            v = self._make_validator(tmp, None)
+            book = vsb.BookResult(name="X", project_path="/x.scriv")
+            v._scrivener_shot(book, Path("/x.scriv"))  # must not raise
+            self.assertEqual(book.screenshots, [])
+
+    def test_exception_in_cleanup_is_suppressed(self):
+        call_count = [0]
+        def run_side_effect(cmd, **kw):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return _completed()  # open -a Scrivener succeeds
+            raise OSError("cleanup failed")  # quit/close raises
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch("scrivcheck.scrivener_running", return_value=False), \
+             mock.patch("scrivcheck.screencapture", return_value=None), \
+             mock.patch("scrivcheck.run", side_effect=run_side_effect), \
+             mock.patch("scrivcheck.time"):
+            v = self._make_validator(tmp, None)
+            book = vsb.BookResult(name="X", project_path="/x.scriv")
+            v._scrivener_shot(book, Path("/x.scriv"))  # must not raise
 
 
 class StripRtfTests(unittest.TestCase):
