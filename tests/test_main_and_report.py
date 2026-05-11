@@ -125,6 +125,7 @@ class MainTests(unittest.TestCase):
                        return_value=False),
             mock.patch("scrivcheck.screencapture",
                        return_value=None),
+            mock.patch.object(vsb.Validator, "_scrivener_shot"),
             mock.patch("scrivcheck.ensure_locally_available"),
             mock.patch("scrivcheck.open_in_browser"),
         ]
@@ -433,6 +434,7 @@ class LatestFlagTests(unittest.TestCase):
             mock.patch.object(vsb.sys, "platform", "darwin"),
             mock.patch("scrivcheck.scrivener_running", return_value=False),
             mock.patch("scrivcheck.screencapture", return_value=None),
+            mock.patch.object(vsb.Validator, "_scrivener_shot"),
             mock.patch("scrivcheck.ensure_locally_available"),
             mock.patch("scrivcheck.open_in_browser"),
         ]
@@ -453,6 +455,7 @@ class LatestFlagTests(unittest.TestCase):
             mock.patch.object(vsb.sys, "platform", "darwin"),
             mock.patch("scrivcheck.scrivener_running", return_value=False),
             mock.patch("scrivcheck.screencapture", return_value=None),
+            mock.patch.object(vsb.Validator, "_scrivener_shot"),
             mock.patch("scrivcheck.ensure_locally_available"),
             mock.patch("scrivcheck.open_in_browser"),
         ]
@@ -494,6 +497,7 @@ class StagingDirReuseTests(unittest.TestCase):
                            return_value=False),
                 mock.patch("scrivcheck.screencapture",
                            return_value=None),
+                mock.patch.object(vsb.Validator, "_scrivener_shot"),
                 mock.patch("scrivcheck.ensure_locally_available"),
             ]
             for p in patches:

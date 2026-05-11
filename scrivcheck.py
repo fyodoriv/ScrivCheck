@@ -53,6 +53,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import unicodedata
 import zipfile
 from dataclasses import dataclass, field
@@ -709,6 +710,30 @@ class Validator:
             book.screenshots.append(result)
         return result
 
+    def _scrivener_shot(self, book: BookResult, project_path: Path) -> None:
+        """Open the restored project in Scrivener, screenshot it, then close it."""
+        if not self.screenshots_enabled:
+            return
+        self.shot_counter += 1
+        slug = re.sub(r"[^a-zA-Z0-9._-]+", "_", book.name).strip("_")
+        path = self.shots_dir / f"{self.shot_counter:03d}_{slug}_scrivener.png"
+        try:
+            run(["open", "-a", "Scrivener", str(project_path)], check=True, timeout=10)
+            time.sleep(4)
+            result = screencapture(path, self.log, enabled=True)
+            if result:
+                book.screenshots.append(result)
+        except Exception as e:
+            self.log.warning("Scrivener screenshot failed: %s", e)
+        try:
+            run(
+                ["osascript", "-e",
+                 'tell application "Scrivener" to close document 1 saving no'],
+                check=False, timeout=5,
+            )
+        except Exception:
+            pass
+
     # --- discovery ---
 
     def discover_books(
@@ -848,7 +873,6 @@ class Validator:
             self.log.info("Quarantining original (no rm)…")
             quarantined_original = self.originals / project_path.name
             shutil.move(str(project_path), str(quarantined_original))
-            self.shot(f"{book.name}_03_after_quarantine", book)
             book.add_step("quarantine_original", True, str(quarantined_original))
 
             # Step 6: unzip backup into staging (with zip-slip guard)
@@ -858,7 +882,6 @@ class Validator:
                 shutil.rmtree(staging_book)
             staging_book.mkdir(parents=True)
             safe_extract_zip(backup_zip, staging_book)
-            self.shot(f"{book.name}_04_unzipped", book)
             book.add_step("unzip_backup", True, str(staging_book))
 
             # Step 7: locate the .scriv inside staging (zip can be either
@@ -879,7 +902,6 @@ class Validator:
             self.log.info("Restoring to local folder with original name…")
             restored = self.local / project_path.name  # uses original .scriv name
             shutil.move(str(unzipped_scriv), str(restored))
-            self.shot(f"{book.name}_05_restored", book)
             book.add_step("restore_to_local", True, str(restored))
 
             # Manifest equality (next step) is sufficient proof that the
@@ -920,6 +942,7 @@ class Validator:
 
             book.status = "PASS"
             self.log.info("✅ %s: PASS", book.name)
+            self._scrivener_shot(book, restored)
 
         except Exception as e:  # noqa: BLE001 — we want to catch everything
             book.status = "FAIL"
@@ -1296,16 +1319,6 @@ def write_html_report(run_dir: Path, books: list[BookResult]) -> Path:
             f'<table class="info">{"".join(rows)}</table>' if rows else ""
         )
 
-        snippet = ""
-        if book.latest_content_snippet and book.status in ("PASS", "SKIPPED"):
-            raw = book.latest_content_snippet.replace("\n", " ")
-            excerpt = raw[-400:].lstrip()
-            if len(raw) > 400:
-                excerpt = "…" + excerpt
-            snippet = (
-                f'<div class="snippet"><b>Latest content:</b> {esc(excerpt)}</div>'
-            )
-
         shots = ""
         for spath in book.screenshots:
             sp = Path(spath)
@@ -1316,11 +1329,21 @@ def write_html_report(run_dir: Path, books: list[BookResult]) -> Path:
                     f'alt="{esc(sp.stem)}" class="shot">'
                 )
 
+        snippet = ""
+        if book.latest_content_snippet and book.status in ("PASS", "SKIPPED"):
+            raw = book.latest_content_snippet.replace("\n", " ")
+            excerpt = raw[-400:].lstrip()
+            if len(raw) > 400:
+                excerpt = "…" + excerpt
+            snippet = (
+                f'<div class="snippet"><b>Latest content:</b> {esc(excerpt)}</div>'
+            )
+
         return (
             f'<div class="card">'
             f'<div class="ch"><span class="bn">{esc(book.name)}</span>'
             f'<span class="badge" style="background:{color}">{book.status}</span></div>'
-            f'<div class="cb">{table}{snippet}{shots}</div>'
+            f'<div class="cb">{table}{shots}{snippet}</div>'
             f'</div>'
         )
 
