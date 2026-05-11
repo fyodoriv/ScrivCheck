@@ -1,0 +1,54 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify binary is present
+        run: test -f ScrivCheck.app/Contents/MacOS/ScrivCheck
+
+      - name: Zip app bundle
+        run: |
+          ditto -c -k --keepParent ScrivCheck.app ScrivCheck.zip
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          gh release create "$TAG" \
+            --title "ScrivCheck $TAG" \
+            --notes "## ScrivCheck $TAG
+
+          ### Install
+
+          1. Download \`ScrivCheck.zip\` below and unzip it.
+          2. Move \`ScrivCheck.app\` to \`~/Applications/\`.
+          3. Right-click → Open the first time (Gatekeeper prompt for unsigned apps).
+          4. Clone or update the Python script:
+             \`\`\`bash
+             git clone https://github.com/fyodoriv/ScrivCheck.git ~/apps/scrivCheck
+             \`\`\`
+          5. Edit \`~/apps/scrivCheck/scrivcheck.py\` — change \`DEFAULT_SCREENSHOT_BOOKS\`
+             near the top to your own book names.
+
+          ### Also install the CLI
+
+          \`\`\`bash
+          chmod +x ~/apps/scrivCheck/scrivcheck.py
+          mkdir -p ~/.local/bin
+          ln -sf ~/apps/scrivCheck/scrivcheck.py ~/.local/bin/scrivcheck
+          \`\`\`
+
+          See [README](https://github.com/fyodoriv/ScrivCheck#readme) for full usage." \
+            ScrivCheck.zip

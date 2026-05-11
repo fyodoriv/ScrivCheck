@@ -107,8 +107,10 @@ FALLBACK_BACKUPS = (
 )
 DEFAULT_RUN_ROOT = Path.home() / "ScrivCheck"
 
-# Books that get a Scrivener screenshot by default (full drill only, not dry-run).
-# Override with --screenshot-books "A,B" or capture all with --screenshot-all-books.
+# *** PERSONALIZE THIS *** Books that get a Scrivener screenshot by default.
+# Change to the names of your own .scriv projects (without the .scriv extension).
+# Books not listed are still fully validated — they just skip the screenshot step.
+# Override at runtime: --screenshot-books "A,B"  or  --screenshot-all-books
 DEFAULT_SCREENSHOT_BOOKS: tuple[str, ...] = (
     "ИЖ",
     "Подпольная Фабрика Смузи",
