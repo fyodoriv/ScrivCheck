@@ -131,7 +131,7 @@ class MainTests(unittest.TestCase):
         return patches
 
     def _argv(self, *extra):
-        # Screenshots are off by default now (was --no-screenshots, now opt-in).
+        # Screenshots are on by default; screencapture is mocked to return None.
         return [
             "scrivcheck.py",
             "--local", str(self.local),

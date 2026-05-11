@@ -1473,12 +1473,10 @@ def main() -> int:
         help="Plan only — no Scrivener interaction, no file changes.",
     )
     parser.add_argument(
-        "--screenshots", action="store_true",
-        help=(
-            "Capture full-screen screenshots at each visible step. Off by "
-            "default; requires macOS Screen Recording permission."
-        ),
+        "--no-screenshots", dest="screenshots", action="store_false",
+        help="Skip screen captures (default: on; requires Screen Recording permission).",
     )
+    parser.set_defaults(screenshots=True)
     parser.add_argument(
         "--keep-quarantine", action="store_true",
         help="Do not auto-purge the quarantine even if all books pass.",

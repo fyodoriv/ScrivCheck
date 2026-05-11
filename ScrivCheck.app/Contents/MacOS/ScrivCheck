@@ -1,8 +1,13 @@
 #!/bin/bash
-VALIDATOR="$HOME/apps/ScrivCheck/scrivcheck.py"
-/usr/bin/osascript <<APPLE
-tell application "Terminal"
-    activate
-    do script "python3 '${VALIDATOR}'"
-end tell
-APPLE
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+SCRIPT="$HOME/apps/ScrivCheck/scrivcheck.py"
+LOG="$TMPDIR/scrivcheck_$(date +%s).log"
+
+osascript -e 'display notification "Validating backups…" with title "ScrivCheck"' 2>/dev/null
+
+if python3 "$SCRIPT" >"$LOG" 2>&1; then
+    :  # browser opens automatically via open_in_browser()
+else
+    FAIL=$(tail -5 "$LOG" 2>/dev/null | tr '"' "'" | tr '\n' ' ')
+    osascript -e "display dialog \"ScrivCheck failed:\\n${FAIL}\" buttons {\"OK\"} default button 1" 2>/dev/null || true
+fi
