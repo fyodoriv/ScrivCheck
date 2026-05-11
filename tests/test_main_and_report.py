@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests._helpers import make_fake_scriv, zip_scriv_package, SAMPLE_BOOK
-import validate_scrivener_backups as vsb
+import scrivcheck as vsb
 
 
 # ---------------------------------------------------------------------------
@@ -121,18 +121,19 @@ class MainTests(unittest.TestCase):
         """Patch everything that talks to macOS. Returns the ExitStack."""
         patches = [
             mock.patch.object(vsb.sys, "platform", "darwin"),
-            mock.patch("validate_scrivener_backups.scrivener_running",
+            mock.patch("scrivcheck.scrivener_running",
                        return_value=False),
-            mock.patch("validate_scrivener_backups.screencapture",
+            mock.patch("scrivcheck.screencapture",
                        return_value=None),
-            mock.patch("validate_scrivener_backups.ensure_locally_available"),
+            mock.patch("scrivcheck.ensure_locally_available"),
+            mock.patch("scrivcheck.open_in_browser"),
         ]
         return patches
 
     def _argv(self, *extra):
         # Screenshots are off by default now (was --no-screenshots, now opt-in).
         return [
-            "validate_scrivener_backups.py",
+            "scrivcheck.py",
             "--local", str(self.local),
             "--backups", str(self.backups),
             "--run-root", str(self.run_root),
@@ -146,7 +147,7 @@ class MainTests(unittest.TestCase):
 
     def test_missing_local_returns_two(self):
         argv = [
-            "validate_scrivener_backups.py",
+            "scrivcheck.py",
             "--local", str(self.root / "nope"),
             "--backups", str(self.backups),
             "--run-root", str(self.run_root),
@@ -157,7 +158,7 @@ class MainTests(unittest.TestCase):
 
     def test_missing_backups_returns_two(self):
         argv = [
-            "validate_scrivener_backups.py",
+            "scrivcheck.py",
             "--local", str(self.local),
             "--backups", str(self.root / "nope"),
             "--run-root", str(self.run_root),
@@ -278,7 +279,7 @@ class ShotTests(unittest.TestCase):
             log.addHandler(logging.NullHandler())
 
             fake_path = "/tmp/fake-screenshot.png"
-            with mock.patch("validate_scrivener_backups.screencapture",
+            with mock.patch("scrivcheck.screencapture",
                             return_value=fake_path):
                 v = vsb.Validator(
                     local_dir=Path(tmp),
@@ -299,7 +300,7 @@ class ShotTests(unittest.TestCase):
             (run_dir / "logs").mkdir(parents=True)
             log = logging.getLogger("shot-no-book")
             log.addHandler(logging.NullHandler())
-            with mock.patch("validate_scrivener_backups.screencapture",
+            with mock.patch("scrivcheck.screencapture",
                             return_value="/tmp/x.png"):
                 v = vsb.Validator(
                     local_dir=Path(tmp),
@@ -313,50 +314,86 @@ class ShotTests(unittest.TestCase):
                 self.assertEqual(v.shot("preflight"), "/tmp/x.png")
 
 
-class ConfirmationShotTests(unittest.TestCase):
-    """confirmation_shot always calls screencapture with enabled=True,
-    regardless of the Validator's screenshots_enabled flag."""
+class LiveSnapshotProofTests(unittest.TestCase):
+    """Cover the LIVE SNAPSHOT section of _emit_proof."""
 
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        root = Path(self.tmp.name)
-        self.run_dir = root / "run"
-        (self.run_dir / "logs").mkdir(parents=True)
-        self.log = logging.getLogger(f"cs-{id(self)}")
-        self.log.addHandler(logging.NullHandler())
-        self.v = vsb.Validator(
-            local_dir=root / "local",
-            backup_dir=root / "backups",
-            run_dir=self.run_dir,
-            log=self.log,
-            screenshots=False,   # screenshots OFF
+    def _make_validator(self, tmp):
+        run_dir = Path(tmp) / "run"
+        (run_dir / "logs").mkdir(parents=True)
+        log = logging.getLogger(f"lsp-{id(self)}")
+        log.addHandler(logging.NullHandler())
+        return vsb.Validator(
+            local_dir=Path(tmp) / "local",
+            backup_dir=Path(tmp) / "backups",
+            run_dir=run_dir,
+            log=log,
+            screenshots=False,
             dry_run=False,
         )
 
-    def tearDown(self):
-        self.tmp.cleanup()
+    def _book(self, **kw):
+        b = vsb.BookResult(name="MyBook", project_path="/x/MyBook.scriv")
+        b.status = "PASS"
+        for k, v in kw.items():
+            setattr(b, k, v)
+        return b
 
-    def test_confirmation_shot_calls_screencapture_with_enabled_true(self):
-        """confirmation_shot ignores screenshots_enabled and always captures."""
-        calls = []
-        def fake_sc(path, log, enabled=True):
-            calls.append(enabled)
-            return None
+    def test_no_post_mtime_leaves_verdict_empty(self):
+        """latest_content_mtime_post=None → mtime_verdict is empty string."""
+        with tempfile.TemporaryDirectory() as tmp:
+            v = self._make_validator(tmp)
+            book = self._book(
+                latest_content_file="Files/Data/X/content.rtf",
+                latest_content_mtime="2026-05-04T19:00:00",
+                latest_content_mtime_post=None,   # <-- branch under test
+                latest_content_snippet="some text",
+            )
+            v._emit_proof(book)
+            proof = (v.run_dir / "proof" / "MyBook.txt").read_text()
+            self.assertIn("LIVE SNAPSHOT", proof)
+            self.assertNotIn("✓ MATCH", proof)
 
-        book = vsb.BookResult(name="MyBook", project_path="/x/MyBook.scriv")
-        with mock.patch("validate_scrivener_backups.screencapture",
-                        side_effect=fake_sc):
-            self.v.confirmation_shot(book)
-        self.assertEqual(calls, [True])
+    def test_malformed_mtime_falls_back_to_dash(self):
+        """ValueError in fromisoformat → mtime_verdict = '—'."""
+        with tempfile.TemporaryDirectory() as tmp:
+            v = self._make_validator(tmp)
+            book = self._book(
+                latest_content_file="Files/Data/X/content.rtf",
+                latest_content_mtime="not-a-date",
+                latest_content_mtime_post="also-not-a-date",
+                latest_content_snippet=None,
+            )
+            v._emit_proof(book)
+            proof = (v.run_dir / "proof" / "MyBook.txt").read_text()
+            self.assertIn("—", proof)
 
-    def test_confirmation_shot_appends_path_to_book_screenshots(self):
-        """When screencapture succeeds, the path is added to book.screenshots."""
-        fake_path = str(self.run_dir / "screenshots" / "001_confirmation_MyBook.png")
-        book = vsb.BookResult(name="MyBook", project_path="/x/MyBook.scriv")
-        with mock.patch("validate_scrivener_backups.screencapture",
-                        return_value=fake_path):
-            self.v.confirmation_shot(book)
-        self.assertIn(fake_path, book.screenshots)
+    def test_long_snippet_gets_ellipsis_prefix(self):
+        """Snippets longer than 400 chars are truncated with a leading '…'."""
+        with tempfile.TemporaryDirectory() as tmp:
+            v = self._make_validator(tmp)
+            book = self._book(
+                latest_content_file="Files/Data/X/content.rtf",
+                latest_content_mtime="2026-05-04T19:00:00",
+                latest_content_mtime_post="2026-05-04T19:01:00",  # zip newer → match
+                latest_content_snippet="x" * 500,
+            )
+            v._emit_proof(book)
+            proof = (v.run_dir / "proof" / "MyBook.txt").read_text()
+            self.assertIn("…", proof)
+
+    def test_backup_older_than_last_save_shows_warning(self):
+        """If the zip predates the last save, verdict warns about the gap."""
+        with tempfile.TemporaryDirectory() as tmp:
+            v = self._make_validator(tmp)
+            book = self._book(
+                latest_content_file="Files/Data/X/content.rtf",
+                latest_content_mtime="2026-05-04T20:00:00",   # file saved at 20:00
+                latest_content_mtime_post="2026-05-04T19:00:00",  # zip from 19:00
+                latest_content_snippet=None,
+            )
+            v._emit_proof(book)
+            proof = (v.run_dir / "proof" / "MyBook.txt").read_text()
+            self.assertIn("⚠", proof)
 
 
 class LatestFlagTests(unittest.TestCase):
@@ -384,7 +421,7 @@ class LatestFlagTests(unittest.TestCase):
 
     def _argv(self, *extra):
         return [
-            "validate_scrivener_backups.py",
+            "scrivcheck.py",
             "--local", str(self.local),
             "--backups", str(self.backups),
             "--run-root", str(self.run_root),
@@ -394,9 +431,10 @@ class LatestFlagTests(unittest.TestCase):
     def test_latest_flag_validates_only_most_recent(self):
         patches = [
             mock.patch.object(vsb.sys, "platform", "darwin"),
-            mock.patch("validate_scrivener_backups.scrivener_running", return_value=False),
-            mock.patch("validate_scrivener_backups.screencapture", return_value=None),
-            mock.patch("validate_scrivener_backups.ensure_locally_available"),
+            mock.patch("scrivcheck.scrivener_running", return_value=False),
+            mock.patch("scrivcheck.screencapture", return_value=None),
+            mock.patch("scrivcheck.ensure_locally_available"),
+            mock.patch("scrivcheck.open_in_browser"),
         ]
         with mock.patch.object(sys, "argv", self._argv("--latest")):
             for p in patches:
@@ -413,9 +451,10 @@ class LatestFlagTests(unittest.TestCase):
     def test_default_mode_validates_all_books(self):
         patches = [
             mock.patch.object(vsb.sys, "platform", "darwin"),
-            mock.patch("validate_scrivener_backups.scrivener_running", return_value=False),
-            mock.patch("validate_scrivener_backups.screencapture", return_value=None),
-            mock.patch("validate_scrivener_backups.ensure_locally_available"),
+            mock.patch("scrivcheck.scrivener_running", return_value=False),
+            mock.patch("scrivcheck.screencapture", return_value=None),
+            mock.patch("scrivcheck.ensure_locally_available"),
+            mock.patch("scrivcheck.open_in_browser"),
         ]
         with mock.patch.object(sys, "argv", self._argv()):
             for p in patches:
@@ -451,11 +490,11 @@ class StagingDirReuseTests(unittest.TestCase):
             log.addHandler(logging.NullHandler())
 
             patches = [
-                mock.patch("validate_scrivener_backups.scrivener_running",
+                mock.patch("scrivcheck.scrivener_running",
                            return_value=False),
-                mock.patch("validate_scrivener_backups.screencapture",
+                mock.patch("scrivcheck.screencapture",
                            return_value=None),
-                mock.patch("validate_scrivener_backups.ensure_locally_available"),
+                mock.patch("scrivcheck.ensure_locally_available"),
             ]
             for p in patches:
                 p.start()
@@ -586,7 +625,7 @@ class RollbackFallbackTests(unittest.TestCase):
         shutil.copytree(self.scriv, quarantined)
 
         book = self._new_book()
-        with mock.patch("validate_scrivener_backups.shutil.copytree",
+        with mock.patch("scrivcheck.shutil.copytree",
                         side_effect=OSError("disk full")):
             self.v._rollback(
                 book=book,
@@ -726,7 +765,7 @@ class EmitProofTests(unittest.TestCase):
         """Dry-run produces a proof block with the zip metadata + pre-flight
         manifest and a DRY-RUN ATTESTATION footer — but NEVER a post-restore
         section, because nothing was restored."""
-        with mock.patch("validate_scrivener_backups.screencapture",
+        with mock.patch("scrivcheck.screencapture",
                         return_value=None):
             v = vsb.Validator(
                 local_dir=self.local, backup_dir=self.backups,
@@ -762,6 +801,72 @@ class EmitProofTests(unittest.TestCase):
         self.assertIn("would_create_backup_dryrun", step_names)
         text = (self.run_dir / "proof" / "MyBook.txt").read_text()
         self.assertIn("DRY-RUN ATTESTATION", text)
+
+
+class WriteHtmlReportTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.run_dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _book(self, name="Book", status="PASS", **kw):
+        b = vsb.BookResult(name=name, project_path=f"/local/{name}.scriv")
+        b.status = status
+        for k, v in kw.items():
+            setattr(b, k, v)
+        return b
+
+    def test_creates_html_file(self):
+        vsb.write_html_report(self.run_dir, [self._book()])
+        self.assertTrue((self.run_dir / "report.html").exists())
+
+    def test_html_contains_book_name(self):
+        out = vsb.write_html_report(self.run_dir, [self._book(name="MyNovel")])
+        self.assertIn("MyNovel", out.read_text())
+
+    def test_pass_status_present(self):
+        out = vsb.write_html_report(self.run_dir, [self._book(status="PASS")])
+        self.assertIn("PASS", out.read_text())
+
+    def test_fail_status_and_reason_present(self):
+        out = vsb.write_html_report(
+            self.run_dir,
+            [self._book(status="FAIL", failure_reason="content drift")],
+        )
+        text = out.read_text()
+        self.assertIn("FAIL", text)
+        self.assertIn("content drift", text)
+
+    def test_screenshot_embedded_as_base64(self):
+        import base64
+        shot_dir = self.run_dir / "screenshots"
+        shot_dir.mkdir()
+        shot = shot_dir / "001_test.png"
+        # A 1×1 white PNG (minimal valid PNG bytes)
+        png_bytes = (
+            b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01'
+            b'\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00'
+            b'\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18'
+            b'\xd8N\x00\x00\x00\x00IEND\xaeB`\x82'
+        )
+        shot.write_bytes(png_bytes)
+        book = self._book()
+        book.screenshots = [str(shot)]
+        out = vsb.write_html_report(self.run_dir, [book])
+        expected = base64.b64encode(png_bytes).decode()
+        self.assertIn(expected, out.read_text())
+
+    def test_empty_books_list_renders_without_crash(self):
+        out = vsb.write_html_report(self.run_dir, [])
+        self.assertIn("0 pass", out.read_text())
+
+    def test_html_escape_applied_to_book_name(self):
+        out = vsb.write_html_report(
+            self.run_dir, [self._book(name="<script>alert(1)</script>")]
+        )
+        self.assertNotIn("<script>", out.read_text())
 
 
 class ScriptEntryTests(unittest.TestCase):

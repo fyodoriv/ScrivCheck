@@ -27,7 +27,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests._helpers import make_fake_scriv, zip_scriv_package, SAMPLE_BOOK
-from validate_scrivener_backups import (
+from scrivcheck import (
     Validator,
     BookResult,
     compute_manifest,
@@ -60,12 +60,12 @@ class FlowTestCase(unittest.TestCase):
 
         # Patch all macOS-specific calls used by validate_book
         patches = [
-            mock.patch("validate_scrivener_backups.scrivener_running",
+            mock.patch("scrivcheck.scrivener_running",
                        return_value=False),
-            mock.patch("validate_scrivener_backups.screencapture",
+            mock.patch("scrivcheck.screencapture",
                        return_value=None),
             mock.patch(
-                "validate_scrivener_backups.ensure_locally_available"
+                "scrivcheck.ensure_locally_available"
             ),
         ]
         self.mocks = [p.start() for p in patches]
@@ -115,7 +115,7 @@ class ScrivenerRunningWarningTests(FlowTestCase):
     in-progress edits). The drill proceeds best-effort."""
 
     def test_warning_step_recorded_when_scrivener_running(self):
-        with mock.patch("validate_scrivener_backups.scrivener_running",
+        with mock.patch("scrivcheck.scrivener_running",
                         return_value=True):
             book = BookResult(name="MyBook", project_path=str(self.scriv))
             self.validator.validate_book(book)
@@ -168,7 +168,7 @@ class HappyPathTests(FlowTestCase):
                     observed["both_present_at_some_point"] = True
             return result
 
-        with mock.patch("validate_scrivener_backups.shutil.move", side_effect=spy_move):
+        with mock.patch("scrivcheck.shutil.move", side_effect=spy_move):
             book = BookResult(name="MyBook", project_path=str(self.scriv))
             self.validator.validate_book(book)
 
@@ -197,7 +197,7 @@ class FailureRollbackTests(FlowTestCase):
         original is never quarantined and the book is marked FAIL."""
         self.zip_path.unlink()
 
-        import validate_scrivener_backups as vsb_module
+        import scrivcheck as vsb_module
         with mock.patch.object(vsb_module, "create_backup_zip",
                                side_effect=OSError("disk full")):
             book = BookResult(name="MyBook", project_path=str(self.scriv))

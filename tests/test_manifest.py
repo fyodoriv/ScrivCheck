@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 
 from tests._helpers import make_fake_scriv, SAMPLE_BOOK
-from validate_scrivener_backups import (
+from scrivcheck import (
     compare_manifests,
     compute_manifest,
     is_volatile,

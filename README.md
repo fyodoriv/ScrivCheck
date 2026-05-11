@@ -1,4 +1,4 @@
-# scrivener-backup-validator
+# ScrivCheck
 
 A chaos engineering drill for Scrivener backups. One command runs the full
 restore exercise across every project you have, verifies the restored
@@ -31,12 +31,13 @@ Replaces this manual checklist:
 …with one command:
 
 ```bash
-./validate_scrivener_backups.py
+./scrivcheck.py
 ```
 
 The tool runs all 10 steps for every `.scriv` project it finds, captures
 a screenshot at each visible step, computes SHA-256 manifests of the
-project before and after restore, and writes a structured report.
+project before and after restore, and writes a structured report — plus
+an HTML dashboard that opens automatically in your browser.
 
 ## Why chaos engineering, not just a backup script
 
@@ -67,11 +68,10 @@ ships.
 Requires Python 3.10+. No third-party dependencies.
 
 ```bash
-git clone https://github.com/fyodoriv/scrivener-backup-validator.git ~/apps/scrivener-backup-validator
-chmod +x ~/apps/scrivener-backup-validator/validate_scrivener_backups.py
+git clone https://github.com/fyodoriv/ScrivCheck.git ~/apps/ScrivCheck
+chmod +x ~/apps/ScrivCheck/scrivcheck.py
 mkdir -p ~/.local/bin
-ln -sf ~/apps/scrivener-backup-validator/validate_scrivener_backups.py \
-       ~/.local/bin/scrivcheck
+ln -sf ~/apps/ScrivCheck/scrivcheck.py ~/.local/bin/scrivcheck
 ```
 
 `~/.local/bin` is on PATH on most modern macOS setups. If it isn't, add
@@ -80,6 +80,19 @@ this line to your `~/.zshrc`:
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
+
+### Spotlight app
+
+`ScrivCheck.app` is included in the repo. Copy it to `~/Applications/` to
+launch ScrivCheck from Spotlight:
+
+```bash
+cp -r ~/apps/ScrivCheck/ScrivCheck.app ~/Applications/
+```
+
+The first time macOS may ask you to confirm opening an app from an
+unidentified developer — right-click → Open if so. After that, `⌘Space
+ScrivCheck` launches it directly.
 
 ## Usage
 
@@ -120,11 +133,9 @@ scrivcheck \                     # different folders
   steals focus, or needs Automation permission. Save manually in
   Scrivener (`⌘S`) before running `scrivcheck` if you want a fresh
   backup validated.
-- **Confirmation screenshot always taken** for the most-recently-edited
-  book. This screenshot captures the terminal at the moment the proof
-  is printed, giving visual confirmation that the drill ran. It requires
-  Screen Recording permission in *System Settings → Privacy & Security*.
-  Pass `--screenshots` for additional screenshots at each intermediate step.
+- **HTML dashboard auto-opens** in your default browser after every
+  run, showing status badges, backup details, content excerpts, and
+  embedded screenshots.
 - **Dry-run is a pure plan**. Hashes the backup zip, computes the
   pre-flight manifest of the live project, prints the plan. No file
   is moved, nothing destructive happens.
@@ -135,13 +146,14 @@ everything is overridable via CLI flags.
 
 ## Output
 
-Each run writes a timestamped directory to `~/scrivener-validation/`:
+Each run writes a timestamped directory to `~/ScrivCheck/`:
 
 ```
-~/scrivener-validation/run_2026-05-03_14-30-22/
+~/ScrivCheck/run_2026-05-03_14-30-22/
 ├── report.json            # full machine-readable state, every step,
 │                          #   every manifest, every diff
 ├── report.txt             # human-readable summary
+├── report.html            # dashboard — auto-opens in browser
 ├── proof/
 │   └── MyBook.txt         # per-book verbose proof block (see below)
 ├── screenshots/                # only when --screenshots is passed
@@ -266,7 +278,7 @@ python3 -m unittest tests.test_validation_flow.HappyPathTests.test_full_flow_pro
 
 # Run with coverage (CI enforces 100%)
 python3 -m pip install coverage
-python3 -m coverage run --source=validate_scrivener_backups -m unittest discover -s tests
+python3 -m coverage run --source=scrivcheck -m unittest discover -s tests
 python3 -m coverage report -m --fail-under=100
 ```
 

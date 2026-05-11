@@ -1,0 +1,8 @@
+#!/bin/bash
+VALIDATOR="$HOME/apps/ScrivCheck/scrivcheck.py"
+/usr/bin/osascript <<APPLE
+tell application "Terminal"
+    activate
+    do script "python3 '${VALIDATOR}'"
+end tell
+APPLE

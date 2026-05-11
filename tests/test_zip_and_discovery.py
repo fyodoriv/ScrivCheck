@@ -16,7 +16,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests._helpers import make_fake_scriv, zip_scriv_package, SAMPLE_BOOK
-from validate_scrivener_backups import Validator
+from scrivcheck import Validator
 
 
 class ZipExtractionTests(unittest.TestCase):
@@ -58,7 +58,7 @@ class ZipExtractionTests(unittest.TestCase):
     def test_round_trip_preserves_content_hashes(self):
         """End-to-end: zip a project, extract, and confirm content
         manifests match. This is the actual property the tool relies on."""
-        from validate_scrivener_backups import compute_manifest, compare_manifests
+        from scrivcheck import compute_manifest, compare_manifests
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)

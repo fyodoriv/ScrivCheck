@@ -31,7 +31,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests._helpers import make_fake_scriv, zip_scriv_package, SAMPLE_BOOK
-import validate_scrivener_backups as vsb
+import scrivcheck as vsb
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +241,7 @@ class MakeRunDirTests(unittest.TestCase):
 
     def test_collision_appends_counter(self):
         # Pre-create the base path; make_run_dir must invent a fresh one
-        with mock.patch("validate_scrivener_backups.datetime") as mdt:
+        with mock.patch("scrivcheck.datetime") as mdt:
             mdt.now.return_value.strftime.return_value = "2026-05-03_22-03-40"
             (self.root / "run_2026-05-03_22-03-40").mkdir()
             d1 = vsb.make_run_dir(self.root)
@@ -251,7 +251,7 @@ class MakeRunDirTests(unittest.TestCase):
             self.assertEqual(d2.name, "run_2026-05-03_22-03-40_2")
 
     def test_exhausted_counter_raises(self):
-        with mock.patch("validate_scrivener_backups.datetime") as mdt:
+        with mock.patch("scrivcheck.datetime") as mdt:
             mdt.now.return_value.strftime.return_value = "T"
             # Fake every candidate as existing
             with mock.patch.object(Path, "exists", return_value=True):
@@ -283,7 +283,7 @@ class DiskSpacePreflightTests(unittest.TestCase):
 
     def test_raises_when_free_space_below_threshold(self):
         fake_usage = mock.MagicMock(free=10)  # 10 bytes free
-        with mock.patch("validate_scrivener_backups.shutil.disk_usage",
+        with mock.patch("scrivcheck.shutil.disk_usage",
                         return_value=fake_usage):
             with self.assertRaises(RuntimeError) as ctx:
                 vsb.assert_enough_free_space(self.scriv, self.run_dir, self.log)
@@ -330,7 +330,7 @@ class DiscoverScrivenerBackupPathTests(unittest.TestCase):
 
     def test_returns_none_when_defaults_command_missing(self):
         with mock.patch(
-            "validate_scrivener_backups.subprocess.run",
+            "scrivcheck.subprocess.run",
             side_effect=FileNotFoundError(),
         ):
             self.assertIsNone(vsb.discover_scrivener_backup_path())
@@ -338,21 +338,21 @@ class DiscoverScrivenerBackupPathTests(unittest.TestCase):
     def test_returns_none_on_timeout(self):
         import subprocess as _sp
         with mock.patch(
-            "validate_scrivener_backups.subprocess.run",
+            "scrivcheck.subprocess.run",
             side_effect=_sp.TimeoutExpired("defaults", 5),
         ):
             self.assertIsNone(vsb.discover_scrivener_backup_path())
 
     def test_returns_none_when_pref_unset(self):
         with mock.patch(
-            "validate_scrivener_backups.subprocess.run",
+            "scrivcheck.subprocess.run",
             return_value=mock.MagicMock(returncode=1, stdout="", stderr=""),
         ):
             self.assertIsNone(vsb.discover_scrivener_backup_path())
 
     def test_returns_none_when_pref_empty_string(self):
         with mock.patch(
-            "validate_scrivener_backups.subprocess.run",
+            "scrivcheck.subprocess.run",
             return_value=mock.MagicMock(returncode=0, stdout="\n"),
         ):
             self.assertIsNone(vsb.discover_scrivener_backup_path())
@@ -360,7 +360,7 @@ class DiscoverScrivenerBackupPathTests(unittest.TestCase):
     def test_returns_path_when_pref_set_and_dir_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch(
-                "validate_scrivener_backups.subprocess.run",
+                "scrivcheck.subprocess.run",
                 return_value=mock.MagicMock(returncode=0, stdout=tmp + "\n"),
             ):
                 self.assertEqual(vsb.discover_scrivener_backup_path(), Path(tmp))
@@ -369,7 +369,7 @@ class DiscoverScrivenerBackupPathTests(unittest.TestCase):
         """A configured-but-deleted path mustn't get returned silently;
         the fallback path is more useful in that case."""
         with mock.patch(
-            "validate_scrivener_backups.subprocess.run",
+            "scrivcheck.subprocess.run",
             return_value=mock.MagicMock(
                 returncode=0, stdout="/Users/nope/totally-not-real/x\n",
             ),
@@ -407,7 +407,7 @@ class MainBackupPathDiscoveryTests(unittest.TestCase):
         with mock.patch.object(vsb.sys, "platform", "darwin"), \
              mock.patch.object(sys, "argv", argv), \
              mock.patch(
-                 "validate_scrivener_backups.discover_scrivener_backup_path",
+                 "scrivcheck.discover_scrivener_backup_path",
                  return_value=self.discovered,
              ):
             self.assertEqual(vsb.main(), 0)
@@ -426,11 +426,11 @@ class MainBackupPathDiscoveryTests(unittest.TestCase):
         with mock.patch.object(vsb.sys, "platform", "darwin"), \
              mock.patch.object(sys, "argv", argv), \
              mock.patch(
-                 "validate_scrivener_backups.discover_scrivener_backup_path",
+                 "scrivcheck.discover_scrivener_backup_path",
                  return_value=None,
              ), \
              mock.patch(
-                 "validate_scrivener_backups.FALLBACK_BACKUPS",
+                 "scrivcheck.FALLBACK_BACKUPS",
                  self.discovered,
              ):
             self.assertEqual(vsb.main(), 0)
@@ -464,11 +464,11 @@ class ValidateBookGuardsTests(unittest.TestCase):
         log.addHandler(logging.NullHandler())
 
         patches = [
-            mock.patch("validate_scrivener_backups.scrivener_running",
+            mock.patch("scrivcheck.scrivener_running",
                        return_value=False),
-            mock.patch("validate_scrivener_backups.screencapture",
+            mock.patch("scrivcheck.screencapture",
                        return_value=None),
-            mock.patch("validate_scrivener_backups.ensure_locally_available"),
+            mock.patch("scrivcheck.ensure_locally_available"),
         ]
         for p in patches:
             p.start()
@@ -504,7 +504,7 @@ class ValidateBookGuardsTests(unittest.TestCase):
         path could fail too. Aborting before quarantine_original keeps
         the live file untouched."""
         with mock.patch(
-            "validate_scrivener_backups.assert_enough_free_space",
+            "scrivcheck.assert_enough_free_space",
             side_effect=RuntimeError("Not enough free space"),
         ):
             book = vsb.BookResult(name="MyBook", project_path=str(self.scriv))

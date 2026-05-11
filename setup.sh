@@ -26,7 +26,7 @@ for arg in "$@"; do
     esac
 done
 
-REPO_NAME="scrivener-backup-validator"
+REPO_NAME="ScrivCheck"
 TARGET="$HOME/apps/$REPO_NAME"
 SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)"
 

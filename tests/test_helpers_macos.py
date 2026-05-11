@@ -18,7 +18,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests._helpers import make_fake_scriv, SAMPLE_BOOK
-import validate_scrivener_backups as vsb
+import scrivcheck as vsb
 
 
 def _completed(stdout: str = "", stderr: str = "", returncode: int = 0) -> subprocess.CompletedProcess:
@@ -29,7 +29,7 @@ def _completed(stdout: str = "", stderr: str = "", returncode: int = 0) -> subpr
 
 class RunHelperTests(unittest.TestCase):
     def test_run_passes_args_through(self):
-        with mock.patch("validate_scrivener_backups.subprocess.run") as mrun:
+        with mock.patch("scrivcheck.subprocess.run") as mrun:
             mrun.return_value = _completed(stdout="hi")
             result = vsb.run(["echo", "hi"])
             self.assertEqual(result.stdout, "hi")
@@ -40,7 +40,7 @@ class RunHelperTests(unittest.TestCase):
             self.assertTrue(kwargs["text"])
 
     def test_run_with_check_false(self):
-        with mock.patch("validate_scrivener_backups.subprocess.run") as mrun:
+        with mock.patch("scrivcheck.subprocess.run") as mrun:
             mrun.return_value = _completed(returncode=2)
             vsb.run(["false"], check=False)
             self.assertFalse(mrun.call_args.kwargs["check"])
@@ -48,14 +48,14 @@ class RunHelperTests(unittest.TestCase):
 
 class OsascriptTests(unittest.TestCase):
     def test_returns_stripped_stdout(self):
-        with mock.patch("validate_scrivener_backups.subprocess.run") as mrun:
+        with mock.patch("scrivcheck.subprocess.run") as mrun:
             mrun.return_value = _completed(stdout="  result  \n")
             self.assertEqual(vsb.osascript('tell application "X"'), "result")
 
     def test_failure_raises_with_stderr_attached(self):
         """The exception MUST carry stderr — that's where AppleScript puts
         actionable error messages (e.g. 'Not authorized to send Apple events')."""
-        with mock.patch("validate_scrivener_backups.subprocess.run") as mrun:
+        with mock.patch("scrivcheck.subprocess.run") as mrun:
             mrun.return_value = _completed(
                 returncode=1, stderr="permission denied", stdout="",
             )
@@ -67,12 +67,12 @@ class OsascriptTests(unittest.TestCase):
 
 class ScrivenerRunningTests(unittest.TestCase):
     def test_running_when_pgrep_finds_process(self):
-        with mock.patch("validate_scrivener_backups.subprocess.run") as mrun:
+        with mock.patch("scrivcheck.subprocess.run") as mrun:
             mrun.return_value = _completed(returncode=0)
             self.assertTrue(vsb.scrivener_running())
 
     def test_not_running_when_pgrep_returns_nonzero(self):
-        with mock.patch("validate_scrivener_backups.subprocess.run") as mrun:
+        with mock.patch("scrivcheck.subprocess.run") as mrun:
             mrun.return_value = _completed(returncode=1)
             self.assertFalse(vsb.scrivener_running())
 
@@ -111,14 +111,14 @@ class ScreencaptureTests(unittest.TestCase):
 
     def test_disabled_returns_none_without_calling_subprocess(self):
         with tempfile.TemporaryDirectory() as tmp, \
-             mock.patch("validate_scrivener_backups.run") as mrun:
+             mock.patch("scrivcheck.run") as mrun:
             out = vsb.screencapture(Path(tmp) / "shot.png", self.log, enabled=False)
             self.assertIsNone(out)
             mrun.assert_not_called()
 
     def test_success_returns_path(self):
         with tempfile.TemporaryDirectory() as tmp, \
-             mock.patch("validate_scrivener_backups.run") as mrun:
+             mock.patch("scrivcheck.run") as mrun:
             mrun.return_value = _completed()
             target = Path(tmp) / "deep" / "shot.png"
             out = vsb.screencapture(target, self.log, enabled=True)
@@ -132,17 +132,66 @@ class ScreencaptureTests(unittest.TestCase):
 
     def test_failure_logs_warning_and_returns_none(self):
         with tempfile.TemporaryDirectory() as tmp, \
-             mock.patch("validate_scrivener_backups.run",
+             mock.patch("scrivcheck.run",
                         side_effect=subprocess.CalledProcessError(1, "screencapture")):
             out = vsb.screencapture(Path(tmp) / "shot.png", self.log, enabled=True)
             self.assertIsNone(out)
 
     def test_timeout_returns_none(self):
         with tempfile.TemporaryDirectory() as tmp, \
-             mock.patch("validate_scrivener_backups.run",
+             mock.patch("scrivcheck.run",
                         side_effect=subprocess.TimeoutExpired("screencapture", 10)):
             out = vsb.screencapture(Path(tmp) / "shot.png", self.log, enabled=True)
             self.assertIsNone(out)
+
+
+
+class StripRtfTests(unittest.TestCase):
+    def _rtf(self, body: str) -> bytes:
+        return (
+            r"{\rtf1\ansi\cocoartf2639"
+            r"{\fonttbl\f0\fswiss Helvetica;}"
+            r"{\colortbl;}"
+            r"\pard\pardeftab720 "
+            + body
+            + "}"
+        ).encode()
+
+    def test_extracts_plain_ascii_text(self):
+        data = self._rtf(r"\f0\fs24 \cf0 Hello, world.")
+        self.assertEqual(vsb.strip_rtf(data), "Hello, world.")
+
+    def test_unicode_escapes_with_uc0_prefix_decoded(self):
+        # \uc0\uN form: first char in each paragraph
+        data = self._rtf("\\uc0\\u1048 \\u1078 ")
+        result = vsb.strip_rtf(data)
+        self.assertIn("И", result)  # U+1048
+        self.assertIn("ж", result)  # U+1078, bare \uN
+
+    def test_unicode_escapes_bare_form_decoded(self):
+        # Scrivener emits bare \uN for subsequent chars after the first \uc0
+        data = self._rtf("\\u1055 \\u1088 \\u1080 \\u1074 \\u1077 \\u1090 ")
+        result = vsb.strip_rtf(data)
+        self.assertIn("Привет", result)
+
+    def test_hex_escapes_decoded(self):
+        data = self._rtf(r"caf\'e9")
+        self.assertIn("é", vsb.strip_rtf(data))
+
+    def test_par_becomes_newline(self):
+        data = self._rtf(r"first\par second")
+        result = vsb.strip_rtf(data)
+        self.assertIn("first", result)
+        self.assertIn("second", result)
+        self.assertIn("\n", result)
+
+    def test_empty_rtf_returns_empty(self):
+        self.assertEqual(vsb.strip_rtf(b""), "")
+
+    def test_utf8_text_passes_through(self):
+        # Modern Scrivener files store UTF-8 Cyrillic directly
+        data = self._rtf("Привет")
+        self.assertIn("Привет", vsb.strip_rtf(data))
 
 
 class EnsureLocallyAvailableTests(unittest.TestCase):
@@ -154,7 +203,7 @@ class EnsureLocallyAvailableTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "f"
             p.write_bytes(b"hello")
-            with mock.patch("validate_scrivener_backups.subprocess.run") as mrun:
+            with mock.patch("scrivcheck.subprocess.run") as mrun:
                 vsb.ensure_locally_available(p, self.log)
                 # brctl must NOT have been called for a readable file
                 mrun.assert_not_called()
@@ -163,7 +212,7 @@ class EnsureLocallyAvailableTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "online-only"
             # File whose open() raises OSError (does not exist)
-            with mock.patch("validate_scrivener_backups.subprocess.run") as mrun:
+            with mock.patch("scrivcheck.subprocess.run") as mrun:
                 vsb.ensure_locally_available(p, self.log)
                 mrun.assert_called_once()
                 self.assertEqual(mrun.call_args.args[0][:2], ["brctl", "download"])

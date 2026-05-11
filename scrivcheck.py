@@ -29,11 +29,11 @@ Chaos engineering principles applied
 
 Usage
 -----
-    ./validate_scrivener_backups.py                    # full drill, all books
-    ./validate_scrivener_backups.py --dry-run          # plan only, no changes
-    ./validate_scrivener_backups.py --book "MyNovel"   # one book by name
-    ./validate_scrivener_backups.py --keep-quarantine  # do not auto-purge on success
-    ./validate_scrivener_backups.py --no-screenshots   # skip screencapture calls
+    ./scrivcheck.py                    # full drill, all books
+    ./scrivcheck.py --dry-run          # plan only, no changes
+    ./scrivcheck.py --book "MyNovel"   # one book by name
+    ./scrivcheck.py --keep-quarantine  # do not auto-purge on success
+    ./scrivcheck.py --no-screenshots   # skip screencapture calls
 
 Quarantine cleanup happens only when ALL validated books pass. Otherwise
 the quarantine is preserved and the path is printed loudly at the end.
@@ -42,8 +42,10 @@ the quarantine is preserved and the path is printed loudly at the end.
 from __future__ import annotations
 
 import argparse
+import base64
 import dataclasses
 import hashlib
+import html as _html
 import json
 import logging
 import os
@@ -59,6 +61,36 @@ from pathlib import Path
 from typing import Optional
 
 
+def strip_rtf(data: bytes) -> str:
+    """Extract plain text from a Scrivener RTF content file.
+
+    Handles the subset of RTF that Scrivener 3 on macOS produces:
+    UTF-8 encoded files with \\uc0\\uNNNN Unicode escapes for compatibility,
+    \\par paragraph breaks, and standard control-word formatting marks.
+    """
+    src = data.decode("utf-8", errors="replace")
+    # RTF Unicode escapes. Scrivener emits \uc0 once then bare \uN for each
+    # subsequent character, so match both forms.  Negative values are valid RTF
+    # (code points above 32767 are stored as signed 16-bit), mod to keep in range.
+    src = re.sub(r"(?:\\uc0)?\\u(-?\d+)\s?",
+                 lambda m: chr(int(m.group(1)) % 0x110000), src)
+    # Hex escapes: \'e9 → é
+    src = re.sub(r"\\'([0-9a-fA-F]{2})",
+                 lambda m: chr(int(m.group(1), 16)), src)
+    # Remove known header control groups (never contain prose)
+    src = re.sub(r"\{\\(?:fonttbl|colortbl|stylesheet|expandedcolortbl)[^{}]*\}", "", src)
+    src = re.sub(r"\{\\\*[^{}]*\}", "", src)
+    # \par (paragraph break) → newline; \pard (reset) is just removed below
+    src = re.sub(r"\\par\b", "\n", src)
+    # Remove all remaining control words and stray backslashes/braces
+    src = re.sub(r"\\[a-zA-Z]+\-?\d*\s?", "", src)
+    src = re.sub(r"[{}\\]", "", src)
+    # Normalise whitespace
+    src = re.sub(r"[ \t]+", " ", src)
+    src = re.sub(r"\n{3,}", "\n\n", src)
+    return src.strip()
+
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -72,7 +104,7 @@ DEFAULT_LOCAL = Path.home() / "Scrivener local"
 FALLBACK_BACKUPS = (
     Path.home() / "Library" / "Application Support" / "Scrivener" / "Backups"
 )
-DEFAULT_RUN_ROOT = Path.home() / "scrivener-validation"
+DEFAULT_RUN_ROOT = Path.home() / "ScrivCheck"
 
 # Scrivener 3's preferences domain and the backup-folder key we read
 # at startup so the user doesn't have to know where their backups are.
@@ -147,6 +179,11 @@ class BookResult:
     steps: list[dict] = field(default_factory=list)
     screenshots: list[str] = field(default_factory=list)
     diff_summary: Optional[dict] = None
+    # Live-snapshot fields: set from the most recently modified content file.
+    latest_content_file: Optional[str] = None   # relpath within .scriv
+    latest_content_mtime: Optional[str] = None  # ISO mtime, pre-drill
+    latest_content_mtime_post: Optional[str] = None  # ISO mtime, post-restore
+    latest_content_snippet: Optional[str] = None     # extracted prose
 
     def add_step(self, name: str, ok: bool, detail: str = "") -> None:
         self.steps.append(
@@ -275,7 +312,11 @@ def discover_scrivener_backup_path() -> Optional[Path]:
     return None
 
 
-def screencapture(out_path: Path, log: logging.Logger, enabled: bool = True) -> Optional[str]:
+def screencapture(
+    out_path: Path,
+    log: logging.Logger,
+    enabled: bool = True,
+) -> Optional[str]:
     """Capture full screen. -x suppresses sound. Returns file path on success."""
     if not enabled:
         return None
@@ -759,6 +800,26 @@ class Validator:
                 f"{book.pre_manifest.total_size:,} bytes",
             )
 
+            # Live snapshot: record mtime + prose of the most recently
+            # modified content file so we can confirm it survives in the backup.
+            rtf_files = [
+                (project_path / rel, rel)
+                for rel in book.pre_manifest.content_entries()
+                if rel.endswith(".rtf")
+            ]
+            if rtf_files:
+                rtf_files.sort(
+                    key=lambda t: t[0].stat().st_mtime
+                    if t[0].exists() else 0,
+                    reverse=True,
+                )
+                latest_path, latest_rel = rtf_files[0]
+                book.latest_content_file = latest_rel
+                book.latest_content_mtime = datetime.fromtimestamp(
+                    latest_path.stat().st_mtime
+                ).isoformat(timespec="seconds")
+                book.latest_content_snippet = strip_rtf(latest_path.read_bytes())
+
             # Step 3: locate latest backup; create one if none exists
             backup_zip = find_latest_backup(self.backups, book.name)
             if not backup_zip:
@@ -832,6 +893,15 @@ class Validator:
             # Step 9: post-restore manifest + comparison
             self.log.info("Computing post-restore manifest…")
             book.post_manifest = compute_manifest(restored)
+
+            # Record the backup zip's mtime as the "backup time" so we can
+            # compare it against the live file's mtime in the proof block.
+            # (Post-restore file mtimes are unreliable: the extraction resets them.)
+            if book.backup_zip:
+                book.latest_content_mtime_post = datetime.fromtimestamp(
+                    Path(book.backup_zip).stat().st_mtime
+                ).isoformat(timespec="seconds")
+
             diff = compare_manifests(book.pre_manifest, book.post_manifest)
             book.diff_summary = diff
             book.add_step(
@@ -1059,6 +1129,44 @@ class Validator:
                 f"    Reason: {book.failure_reason}",
             )
 
+        # Live snapshot: mtime comparison + prose excerpt.
+        if book.latest_content_file and book.status in ("PASS", "SKIPPED"):
+            mtime_pre = book.latest_content_mtime or "—"
+            mtime_post = book.latest_content_mtime_post
+            if mtime_post:
+                # Backup must be at least as new as the last file save.
+                try:
+                    zip_ts = datetime.fromisoformat(mtime_post).timestamp()
+                    file_ts = datetime.fromisoformat(mtime_pre).timestamp()
+                    if zip_ts >= file_ts:
+                        mtime_verdict = "✓ backup captured this edit"
+                    else:
+                        gap = file_ts - zip_ts
+                        mtime_verdict = f"⚠ backup is {gap:.0f}s older than last save"
+                except ValueError:
+                    mtime_verdict = "—"
+            else:
+                mtime_verdict = ""
+
+            both("", "LIVE SNAPSHOT")
+            both(f"    Most recently edited:  {book.latest_content_file}")
+            both(f"    Last saved to local folder: {mtime_pre}")
+            if mtime_post:
+                both(f"    Backup zip created:        {mtime_post}  {mtime_verdict}")
+
+            if book.latest_content_snippet:
+                # Show up to ~400 chars, trimmed to word boundary, indented.
+                raw = book.latest_content_snippet.replace("\n", " ")
+                excerpt = raw[-400:].lstrip()
+                if len(raw) > 400:
+                    excerpt = "…" + excerpt
+                wrapped = []
+                while excerpt:
+                    wrapped.append("    " + excerpt[:78])
+                    excerpt = excerpt[78:]
+                both("", "    Text from backup:")
+                both(*wrapped)
+
         both(bar)
 
         # Full detail → debug log + proof file (durable artifact).
@@ -1072,16 +1180,6 @@ class Validator:
         for line in brief:
             self.log.info(line)
 
-    def confirmation_shot(self, book: BookResult) -> None:
-        """Take a screenshot unconditionally (ignores screenshots_enabled).
-        Used for the latest-edited book to give visual confirmation."""
-        self.shot_counter += 1
-        slug = re.sub(r"[^a-zA-Z0-9._-]+", "_", book.name).strip("_")
-        path = self.shots_dir / f"{self.shot_counter:03d}_confirmation_{slug}.png"
-        result = screencapture(path, self.log, enabled=True)
-        if result:
-            book.screenshots.append(result)
-            self.log.info("Confirmation screenshot: %s", path)
 
     def _rollback(
         self,
@@ -1130,6 +1228,167 @@ class Validator:
 # ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
+
+
+def write_html_report(run_dir: Path, books: list[BookResult]) -> Path:
+    """Generate a self-contained HTML dashboard; return its path."""
+
+    def esc(s: object) -> str:
+        return _html.escape(str(s)) if s is not None else ""
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    passed = sum(1 for b in books if b.status == "PASS")
+    failed = sum(1 for b in books if b.status == "FAIL")
+
+    _STATUS_COLOR = {
+        "PASS": "#16a34a", "FAIL": "#dc2626",
+        "SKIPPED": "#64748b", "PENDING": "#64748b",
+    }
+
+    def _book_card(book: BookResult) -> str:
+        color = _STATUS_COLOR.get(book.status, "#64748b")
+        rows: list[str] = []
+
+        if book.backup_zip:
+            zp = Path(book.backup_zip)
+            if zp.exists():
+                st = zp.stat()
+                mtime = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
+                rows.append(
+                    f'<tr><th>Backup</th><td><code>{esc(zp.name)}</code></td></tr>'
+                    f'<tr><th>Size</th><td>{st.st_size:,} B</td></tr>'
+                    f'<tr><th>Modified</th><td>{mtime}</td></tr>'
+                )
+
+        if book.pre_manifest:
+            pre_cnt = len(book.pre_manifest.content_entries())
+            rows.append(
+                f'<tr><th>Pre-flight</th><td>{pre_cnt} content files &nbsp; '
+                f'{book.pre_manifest.total_size:,} B total</td></tr>'
+            )
+        if book.post_manifest:
+            post_cnt = len(book.post_manifest.content_entries())
+            rows.append(
+                f'<tr><th>Post-restore</th><td>{post_cnt} content files &nbsp; '
+                f'{book.post_manifest.total_size:,} B total</td></tr>'
+            )
+
+        if book.diff_summary:
+            d = book.diff_summary
+            if d["ok"]:
+                cell = '<span class="ok">&#10003; All SHA-256 match</span>'
+            else:
+                parts = []
+                if d["content_missing"]:
+                    parts.append(f'{len(d["content_missing"])} missing')
+                if d["content_changed"]:
+                    parts.append(f'{len(d["content_changed"])} changed')
+                cell = f'<span class="err">&#10007; {", ".join(parts)}</span>'
+            rows.append(f'<tr><th>Diff</th><td>{cell}</td></tr>')
+
+        if book.failure_reason:
+            rows.append(
+                f'<tr><th>Reason</th>'
+                f'<td><span class="err">{esc(book.failure_reason)}</span></td></tr>'
+            )
+
+        table = (
+            f'<table class="info">{"".join(rows)}</table>' if rows else ""
+        )
+
+        snippet = ""
+        if book.latest_content_snippet and book.status in ("PASS", "SKIPPED"):
+            raw = book.latest_content_snippet.replace("\n", " ")
+            excerpt = raw[-400:].lstrip()
+            if len(raw) > 400:
+                excerpt = "…" + excerpt
+            snippet = (
+                f'<div class="snippet"><b>Latest content:</b> {esc(excerpt)}</div>'
+            )
+
+        shots = ""
+        for spath in book.screenshots:
+            sp = Path(spath)
+            if sp.exists():
+                data = base64.b64encode(sp.read_bytes()).decode()
+                shots += (
+                    f'<img src="data:image/png;base64,{data}" '
+                    f'alt="{esc(sp.stem)}" class="shot">'
+                )
+
+        return (
+            f'<div class="card">'
+            f'<div class="ch"><span class="bn">{esc(book.name)}</span>'
+            f'<span class="badge" style="background:{color}">{book.status}</span></div>'
+            f'<div class="cb">{table}{snippet}{shots}</div>'
+            f'</div>'
+        )
+
+    if failed > 0:
+        bar_color = _STATUS_COLOR["FAIL"]
+    elif passed > 0:
+        bar_color = _STATUS_COLOR["PASS"]
+    else:
+        bar_color = "#64748b"
+
+    cards = "\n".join(_book_card(b) for b in books)
+
+    page = (
+        "<!DOCTYPE html><html lang=\"en\"><head>"
+        "<meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        f"<title>Scrivener Backup Check — {now}</title>"
+        "<style>"
+        "*{box-sizing:border-box;margin:0;padding:0}"
+        "body{font:15px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;"
+        "background:#f1f5f9;color:#0f172a;padding:24px 32px}"
+        "h1{font-size:1.3rem;font-weight:700;margin-bottom:2px}"
+        ".meta{font-size:.75rem;color:#64748b;margin-bottom:14px}"
+        f".bar{{display:inline-flex;gap:12px;padding:6px 14px;border-radius:8px;"
+        f"background:{bar_color};color:#fff;font-weight:600;font-size:.9rem;"
+        "margin-bottom:22px}"
+        ".card{background:#fff;border:1px solid #e2e8f0;border-radius:10px;"
+        "margin-bottom:14px;overflow:hidden}"
+        ".ch{display:flex;align-items:center;justify-content:space-between;"
+        "padding:10px 14px;background:#f8fafc;border-bottom:1px solid #e2e8f0}"
+        ".bn{font-weight:600}"
+        ".badge{padding:2px 10px;border-radius:20px;color:#fff;"
+        "font-size:.75rem;font-weight:700;letter-spacing:.4px}"
+        ".cb{padding:12px 14px}"
+        ".info{width:100%;border-collapse:collapse;font-size:.82rem;margin-bottom:8px}"
+        ".info th{text-align:left;color:#64748b;font-weight:500;padding:2px 0;"
+        "width:100px;white-space:nowrap}"
+        ".info td{padding:2px 0}"
+        "code{font-family:ui-monospace,monospace;background:#f1f5f9;"
+        "padding:1px 4px;border-radius:3px;font-size:.8rem}"
+        ".ok{color:#16a34a;font-weight:500}"
+        ".err{color:#dc2626}"
+        ".snippet{font-size:.8rem;color:#475569;background:#f8fafc;padding:8px;"
+        "border-radius:4px;margin-top:6px;line-height:1.5}"
+        ".shot{max-width:100%;border-radius:6px;border:1px solid #e2e8f0;"
+        "margin-top:10px;display:block}"
+        "</style></head><body>"
+        "<h1>Scrivener Backup Validation</h1>"
+        f'<div class="meta">{esc(str(run_dir))} &nbsp;&middot;&nbsp; {now}</div>'
+        f'<div class="bar"><span>{passed} pass</span>'
+        f'<span>{failed} fail</span><span>{len(books)} total</span></div>'
+        f"{cards}"
+        "</body></html>"
+    )
+
+    out = run_dir / "report.html"
+    out.write_text(page, encoding="utf-8")
+    return out
+
+
+def open_in_browser(path: Path) -> None:
+    """Open path in the default browser. Best-effort; never raises."""
+    try:
+        subprocess.run(
+            ["open", str(path)], check=False, capture_output=True, timeout=5,
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def write_report(run_dir: Path, books: list[BookResult]) -> Path:
@@ -1290,18 +1549,12 @@ def main() -> int:
     )
     log.info("Validating %d book(s): %s", len(books), selection)
 
-    # Identify the most-recently-edited book for the confirmation screenshot.
-    latest_book_name = max(
-        books, key=lambda b: Path(b.project_path).stat().st_mtime
-    ).name
-
     for book in books:
         validator.validate_book(book)
-        if book.name == latest_book_name:
-            validator.confirmation_shot(book)
 
     # Final report
     report_path = write_report(run_dir, books)
+    html_path = write_html_report(run_dir, books)
     log.info("Report: %s", report_path)
 
     failed = [b for b in books if b.status == "FAIL"]
@@ -1312,8 +1565,11 @@ def main() -> int:
     print(f"PASS: {len(passed)}    FAIL: {len(failed)}    "
           f"TOTAL: {len(books)}")
     print(f"Report:    {report_path}")
+    print(f"Dashboard: {html_path}")
     print(f"Screens:   {validator.shots_dir}")
     print("=" * 60)
+
+    open_in_browser(html_path)
 
     # Quarantine policy: purge ONLY if every book passed AND user didn't
     # ask to keep it. Otherwise loud-print the path.

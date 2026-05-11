@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 
 from tests._helpers import make_fake_scriv  # noqa: F401 (import side-effects: sys.path)
-from validate_scrivener_backups import find_latest_backup
+from scrivcheck import find_latest_backup
 
 
 def _touch(path: Path, mtime: float, content: bytes = b"x") -> None:
