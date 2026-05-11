@@ -1,6 +1,6 @@
 #!/bin/bash
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-SCRIPT="$HOME/apps/ScrivCheck/scrivcheck.py"
+SCRIPT="$HOME/apps/scrivCheck/scrivcheck.py"
 LOG="$TMPDIR/scrivcheck_$(date +%s).log"
 
 osascript -e 'display notification "Validating backups…" with title "ScrivCheck"' 2>/dev/null

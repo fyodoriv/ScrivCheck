@@ -68,10 +68,10 @@ ships.
 Requires Python 3.10+. No third-party dependencies.
 
 ```bash
-git clone https://github.com/fyodoriv/ScrivCheck.git ~/apps/ScrivCheck
-chmod +x ~/apps/ScrivCheck/scrivcheck.py
+git clone https://github.com/fyodoriv/ScrivCheck.git ~/apps/scrivCheck
+chmod +x ~/apps/scrivCheck/scrivcheck.py
 mkdir -p ~/.local/bin
-ln -sf ~/apps/ScrivCheck/scrivcheck.py ~/.local/bin/scrivcheck
+ln -sf ~/apps/scrivCheck/scrivcheck.py ~/.local/bin/scrivcheck
 ```
 
 `~/.local/bin` is on PATH on most modern macOS setups. If it isn't, add
@@ -87,7 +87,7 @@ export PATH="$HOME/.local/bin:$PATH"
 launch ScrivCheck from Spotlight:
 
 ```bash
-cp -r ~/apps/ScrivCheck/ScrivCheck.app ~/Applications/
+cp -r ~/apps/scrivCheck/ScrivCheck.app ~/Applications/
 ```
 
 The first time macOS may ask you to confirm opening an app from an
