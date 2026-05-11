@@ -406,6 +406,8 @@ class MainBackupPathDiscoveryTests(unittest.TestCase):
         ]
         with mock.patch.object(vsb.sys, "platform", "darwin"), \
              mock.patch.object(sys, "argv", argv), \
+             mock.patch("scrivcheck.screencapture", return_value=None), \
+             mock.patch("scrivcheck.open_in_browser"), \
              mock.patch(
                  "scrivcheck.discover_scrivener_backup_path",
                  return_value=self.discovered,
@@ -425,6 +427,8 @@ class MainBackupPathDiscoveryTests(unittest.TestCase):
         ]
         with mock.patch.object(vsb.sys, "platform", "darwin"), \
              mock.patch.object(sys, "argv", argv), \
+             mock.patch("scrivcheck.screencapture", return_value=None), \
+             mock.patch("scrivcheck.open_in_browser"), \
              mock.patch(
                  "scrivcheck.discover_scrivener_backup_path",
                  return_value=None,
