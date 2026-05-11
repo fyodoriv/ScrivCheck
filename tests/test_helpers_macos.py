@@ -145,6 +145,104 @@ class ScreencaptureTests(unittest.TestCase):
             self.assertIsNone(out)
 
 
+class ScrivenerShotFilterTests(unittest.TestCase):
+    """_scrivener_shot skips books not in the screenshot_books list."""
+
+    def _make_validator(self, tmp, screenshot_books):
+        run_dir = Path(tmp) / "run"
+        (run_dir / "logs").mkdir(parents=True)
+        log = logging.getLogger(f"ssf-{id(self)}")
+        log.addHandler(logging.NullHandler())
+        return vsb.Validator(
+            local_dir=Path(tmp),
+            backup_dir=Path(tmp),
+            run_dir=run_dir,
+            log=log,
+            screenshots=True,
+            screenshot_books=screenshot_books,
+        )
+
+    def test_unlisted_book_skips_screenshot(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch("scrivcheck.scrivener_running", return_value=False), \
+             mock.patch("scrivcheck.run") as mrun:
+            v = self._make_validator(tmp, ("IncludedBook",))
+            book = vsb.BookResult(name="OtherBook", project_path="/x.scriv")
+            v._scrivener_shot(book, Path("/x.scriv"))
+            mrun.assert_not_called()
+            self.assertEqual(book.screenshots, [])
+
+    def test_listed_book_proceeds_to_open_scrivener(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch("scrivcheck.scrivener_running", return_value=False), \
+             mock.patch("scrivcheck.screencapture", return_value=None), \
+             mock.patch("scrivcheck.run") as mrun, \
+             mock.patch("scrivcheck.time") as mtime:
+            mrun.return_value = _completed()
+            v = self._make_validator(tmp, ("MyBook",))
+            book = vsb.BookResult(name="MyBook", project_path="/x.scriv")
+            v._scrivener_shot(book, Path("/x.scriv"))
+            open_call = mrun.call_args_list[0].args[0]
+            self.assertIn("Scrivener", open_call)
+
+    def test_none_screenshot_books_captures_any_book(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch("scrivcheck.scrivener_running", return_value=False), \
+             mock.patch("scrivcheck.screencapture", return_value=None), \
+             mock.patch("scrivcheck.run") as mrun, \
+             mock.patch("scrivcheck.time"):
+            mrun.return_value = _completed()
+            v = self._make_validator(tmp, None)
+            book = vsb.BookResult(name="AnyBook", project_path="/x.scriv")
+            v._scrivener_shot(book, Path("/x.scriv"))
+            open_call = mrun.call_args_list[0].args[0]
+            self.assertIn("Scrivener", open_call)
+
+    def test_case_insensitive_match(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch("scrivcheck.scrivener_running", return_value=False), \
+             mock.patch("scrivcheck.screencapture", return_value=None), \
+             mock.patch("scrivcheck.run") as mrun, \
+             mock.patch("scrivcheck.time"):
+            mrun.return_value = _completed()
+            v = self._make_validator(tmp, ("mybook",))
+            book = vsb.BookResult(name="MyBook", project_path="/x.scriv")
+            v._scrivener_shot(book, Path("/x.scriv"))
+            self.assertTrue(mrun.called)
+
+    def test_quit_scrivener_when_not_previously_running(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch("scrivcheck.scrivener_running", return_value=False), \
+             mock.patch("scrivcheck.screencapture", return_value=None), \
+             mock.patch("scrivcheck.run") as mrun, \
+             mock.patch("scrivcheck.time"):
+            mrun.return_value = _completed()
+            v = self._make_validator(tmp, None)
+            book = vsb.BookResult(name="X", project_path="/x.scriv")
+            v._scrivener_shot(book, Path("/x.scriv"))
+            osascript_calls = [
+                c.args[0] for c in mrun.call_args_list
+                if c.args and "osascript" in c.args[0]
+            ]
+            self.assertTrue(any("quit" in " ".join(c) for c in osascript_calls))
+
+    def test_close_document_when_scrivener_was_running(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch("scrivcheck.scrivener_running", return_value=True), \
+             mock.patch("scrivcheck.screencapture", return_value=None), \
+             mock.patch("scrivcheck.run") as mrun, \
+             mock.patch("scrivcheck.time"):
+            mrun.return_value = _completed()
+            v = self._make_validator(tmp, None)
+            book = vsb.BookResult(name="X", project_path="/x.scriv")
+            v._scrivener_shot(book, Path("/x.scriv"))
+            osascript_calls = [
+                c.args[0] for c in mrun.call_args_list
+                if c.args and "osascript" in c.args[0]
+            ]
+            self.assertTrue(any("close document" in " ".join(c) for c in osascript_calls))
+            self.assertFalse(any("quit" in " ".join(c) for c in osascript_calls))
+
 
 class StripRtfTests(unittest.TestCase):
     def _rtf(self, body: str) -> bytes:

@@ -872,6 +872,19 @@ class WriteHtmlReportTests(unittest.TestCase):
         )
         self.assertNotIn("<script>", out.read_text())
 
+    def test_screenshot_note_shows_named_books(self):
+        out = vsb.write_html_report(
+            self.run_dir, [], screenshot_books=("Alpha", "Beta"),
+        )
+        text = out.read_text()
+        self.assertIn("Alpha", text)
+        self.assertIn("Beta", text)
+        self.assertIn("--screenshot-books", text)
+
+    def test_screenshot_note_shows_all_when_none(self):
+        out = vsb.write_html_report(self.run_dir, [], screenshot_books=None)
+        self.assertIn("all validated books", out.read_text())
+
 
 class ScriptEntryTests(unittest.TestCase):
     def test_running_module_as_script_invokes_main(self):

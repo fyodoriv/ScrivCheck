@@ -107,6 +107,15 @@ FALLBACK_BACKUPS = (
 )
 DEFAULT_RUN_ROOT = Path.home() / "ScrivCheck"
 
+# Books that get a Scrivener screenshot by default (full drill only, not dry-run).
+# Override with --screenshot-books "A,B" or capture all with --screenshot-all-books.
+DEFAULT_SCREENSHOT_BOOKS: tuple[str, ...] = (
+    "ИЖ",
+    "Подпольная Фабрика Смузи",
+    "00-00",
+    "Рассвет",
+)
+
 # Scrivener 3's preferences domain and the backup-folder key we read
 # at startup so the user doesn't have to know where their backups are.
 SCRIVENER_PREFS_DOMAIN = "com.literatureandlatte.scrivener3"
@@ -679,6 +688,7 @@ class Validator:
         log: logging.Logger,
         screenshots: bool = True,
         dry_run: bool = False,
+        screenshot_books: Optional[tuple[str, ...]] = None,
     ) -> None:
         self.local = local_dir
         self.backups = backup_dir
@@ -686,6 +696,11 @@ class Validator:
         self.log = log
         self.screenshots_enabled = screenshots
         self.dry_run = dry_run
+        # None = screenshot every book; tuple = only books whose names match (case-insensitive)
+        self._screenshot_book_keys: Optional[frozenset[str]] = (
+            frozenset(b.lower() for b in screenshot_books)
+            if screenshot_books is not None else None
+        )
 
         self.quarantine = run_dir / "quarantine"
         self.safety = self.quarantine / "safety-copies"
@@ -714,6 +729,10 @@ class Validator:
         """Open the restored project in Scrivener, screenshot it, then close it."""
         if not self.screenshots_enabled:
             return
+        if (self._screenshot_book_keys is not None
+                and book.name.lower() not in self._screenshot_book_keys):
+            return
+        was_running = scrivener_running()
         self.shot_counter += 1
         slug = re.sub(r"[^a-zA-Z0-9._-]+", "_", book.name).strip("_")
         path = self.shots_dir / f"{self.shot_counter:03d}_{slug}_scrivener.png"
@@ -725,12 +744,21 @@ class Validator:
                 book.screenshots.append(result)
         except Exception as e:
             self.log.warning("Scrivener screenshot failed: %s", e)
+        # Clean up: quit entirely if we launched Scrivener; close just the
+        # document if it was already open before we arrived.
         try:
-            run(
-                ["osascript", "-e",
-                 'tell application "Scrivener" to close document 1 saving no'],
-                check=False, timeout=5,
-            )
+            if was_running:
+                run(
+                    ["osascript", "-e",
+                     'tell application "Scrivener" to close document 1 saving no'],
+                    check=False, timeout=5,
+                )
+            else:
+                run(
+                    ["osascript", "-e",
+                     'tell application "Scrivener" to quit saving no'],
+                    check=False, timeout=10,
+                )
         except Exception:
             pass
 
@@ -1253,7 +1281,29 @@ class Validator:
 # ---------------------------------------------------------------------------
 
 
-def write_html_report(run_dir: Path, books: list[BookResult]) -> Path:
+def _shot_note_html(screenshot_books: Optional[tuple[str, ...]], esc) -> str:
+    if screenshot_books is None:
+        books_text = "<strong>all validated books</strong>"
+        hint = (
+            'limit with <code>--screenshot-books &quot;Name1,Name2&quot;</code>'
+        )
+    else:
+        books_text = ", ".join(f"<strong>{esc(b)}</strong>" for b in screenshot_books)
+        hint = (
+            'add more with <code>--screenshot-books &quot;A,B,C&quot;</code>'
+            ' &middot; capture all with <code>--screenshot-all-books</code>'
+        )
+    return (
+        f'<div class="shot-note">Screenshots: {books_text}'
+        f' &nbsp;&middot;&nbsp; {hint}</div>'
+    )
+
+
+def write_html_report(
+    run_dir: Path,
+    books: list[BookResult],
+    screenshot_books: Optional[tuple[str, ...]] = None,
+) -> Path:
     """Generate a self-contained HTML dashboard; return its path."""
 
     def esc(s: object) -> str:
@@ -1369,7 +1419,8 @@ def write_html_report(run_dir: Path, books: list[BookResult]) -> Path:
         ".meta{font-size:.75rem;color:#64748b;margin-bottom:14px}"
         f".bar{{display:inline-flex;gap:12px;padding:6px 14px;border-radius:8px;"
         f"background:{bar_color};color:#fff;font-weight:600;font-size:.9rem;"
-        "margin-bottom:22px}"
+        "margin-bottom:10px}"
+        ".shot-note{font-size:.75rem;color:#64748b;margin-bottom:18px}"
         ".card{background:#fff;border:1px solid #e2e8f0;border-radius:10px;"
         "margin-bottom:14px;overflow:hidden}"
         ".ch{display:flex;align-items:center;justify-content:space-between;"
@@ -1395,6 +1446,7 @@ def write_html_report(run_dir: Path, books: list[BookResult]) -> Path:
         f'<div class="meta">{esc(str(run_dir))} &nbsp;&middot;&nbsp; {now}</div>'
         f'<div class="bar"><span>{passed} pass</span>'
         f'<span>{failed} fail</span><span>{len(books)} total</span></div>'
+        + _shot_note_html(screenshot_books, esc) +
         f"{cards}"
         "</body></html>"
     )
@@ -1500,6 +1552,19 @@ def main() -> int:
         help="Skip screen captures (default: on; requires Screen Recording permission).",
     )
     parser.set_defaults(screenshots=True)
+    _default_books_str = ", ".join(DEFAULT_SCREENSHOT_BOOKS)
+    parser.add_argument(
+        "--screenshot-books", type=str, default=None, metavar="NAMES",
+        help=(
+            f"Comma-separated book names to capture in Scrivener screenshots. "
+            f"Default: {_default_books_str}. "
+            f"Use --screenshot-all-books to capture every validated book."
+        ),
+    )
+    parser.add_argument(
+        "--screenshot-all-books", action="store_true",
+        help="Capture a Scrivener screenshot for every validated book.",
+    )
     parser.add_argument(
         "--keep-quarantine", action="store_true",
         help="Do not auto-purge the quarantine even if all books pass.",
@@ -1548,6 +1613,14 @@ def main() -> int:
         )
         return 2
 
+    # Resolve screenshot-book filter. None = capture all books.
+    if not args.screenshots or args.screenshot_all_books:
+        shot_books: Optional[tuple[str, ...]] = None
+    elif args.screenshot_books is not None:
+        shot_books = tuple(b.strip() for b in args.screenshot_books.split(",") if b.strip())
+    else:
+        shot_books = DEFAULT_SCREENSHOT_BOOKS
+
     validator = Validator(
         local_dir=args.local,
         backup_dir=args.backups,
@@ -1555,6 +1628,7 @@ def main() -> int:
         log=log,
         screenshots=args.screenshots,
         dry_run=args.dry_run,
+        screenshot_books=shot_books,
     )
     validator.shot("00_preflight")
 
@@ -1575,7 +1649,7 @@ def main() -> int:
 
     # Final report
     report_path = write_report(run_dir, books)
-    html_path = write_html_report(run_dir, books)
+    html_path = write_html_report(run_dir, books, screenshot_books=shot_books)
     log.info("Report: %s", report_path)
 
     failed = [b for b in books if b.status == "FAIL"]
